@@ -1,0 +1,6 @@
+/bin/
+/dist/
+*.test
+# 憑證一律不進 repo（見 README：~/.config/hrm-sql-mcp/credentials.env）
+*.env
+!testdata/*.env

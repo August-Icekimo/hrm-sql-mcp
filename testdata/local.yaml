@@ -1,0 +1,39 @@
+# 本機開發用政策（podman 容器 HRM_TEST_0205）
+#
+# 正式的政策檔住在被服務的專案裡（HRM 是 mcp/hrm-sql.yaml）。
+# 這一份留在 repo 內只作為開發與整合測試用的樣本。
+server:
+  name: hrm-sql-mcp
+  version: 0.1.0
+
+profile: local
+
+targets:
+  - alias: local_hrm
+    host: 127.0.0.1
+    port: 1433
+    database: hrm
+    # 容器只綁本機，allow_cidrs 收得比實際更緊沒有壞處
+    allow_cidrs: ["127.0.0.0/8"]
+    encrypt: true
+    # 容器用自簽憑證。這給的是「有加密但不驗證伺服器身分」，
+    # 本機 loopback 可接受；連 UAT 時要重新評估。
+    trust_server_certificate: true
+    app_name: hrm-sql-mcp
+    writable: true
+
+limits:
+  max_rows: 500
+  max_bytes: 1048576
+  query_timeout: 30s
+  execute_timeout: 120s
+  lock_timeout: 5s
+
+paths:
+  sp_dir: "Stored Procedure"
+  schema_dict: ".gemini/database_schema.md"
+  java_src_dir: "src"
+
+audit:
+  file: "~/.local/state/hrm-sql-mcp/audit.jsonl"
+  snapshot_dir: "~/.local/state/hrm-sql-mcp/snapshots"
