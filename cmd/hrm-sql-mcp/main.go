@@ -37,6 +37,10 @@ func run(args []string) error {
 		return cmdDeps(args[1:])
 	case "schema":
 		return cmdSchema(args[1:])
+	case "execute":
+		return cmdExecute(args[1:])
+	case "approve":
+		return cmdApprove(args[1:])
 	case "sp":
 		return cmdSP(args[1:])
 	case "help", "-h", "--help":
@@ -75,6 +79,11 @@ func usage() error {
   sp get <name>        Print one procedure's definition from the database
   sp diff [name...]    Compare scripts against the database
   sp audit             Three-way audit: files x database x Java call sites
+  sp deploy --name N   Create or replace a procedure (snapshots the old one first)
+
+Write path (needs an approval; rehearses and rolls back by default):
+  execute <sql|->      Run a data change. Add --commit --approval <id> to make it stick
+  approve [id]         List pending approvals, or read one and decide
 
 Environment:
   HRM_SQL_MCP_PROFILE       required, one of: local, uat  (no default)

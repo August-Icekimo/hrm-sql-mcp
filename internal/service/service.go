@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/codex-k8s/hrm-sql-mcp/internal/approver"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/audit"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/config"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/policy"
+	"github.com/codex-k8s/hrm-sql-mcp/internal/snapshots"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/sqlrun"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/target"
 )
@@ -18,10 +21,12 @@ import (
 // Service holds the process-wide state: one policy, one connection registry,
 // one audit log.
 type Service struct {
-	cfg config.Config
-	pol *policy.Policy
-	reg *target.Registry
-	log *audit.Writer
+	cfg   config.Config
+	pol   *policy.Policy
+	reg   *target.Registry
+	log   *audit.Writer
+	appr  *approver.Store
+	snaps *snapshots.Store
 
 	mu     sync.Mutex
 	logins map[string]string
@@ -64,7 +69,24 @@ func New() (*Service, error) {
 		log.Close()
 		return nil, err
 	}
-	return &Service{cfg: cfg, pol: pol, reg: reg, log: log, logins: map[string]string{}}, nil
+	// Both live beside the audit log and are opened at startup for the same
+	// reason it is: a write path that discovers halfway through that it cannot
+	// record or cannot save a pre-image has already done the damage.
+	appr, err := approver.Open(approvalDir(pol.Audit.SnapshotDir))
+	if err != nil {
+		log.Close()
+		return nil, err
+	}
+	snaps, err := snapshots.Open(pol.Audit.SnapshotDir)
+	if err != nil {
+		log.Close()
+		return nil, err
+	}
+
+	return &Service{
+		cfg: cfg, pol: pol, reg: reg, log: log,
+		appr: appr, snaps: snaps, logins: map[string]string{},
+	}, nil
 }
 
 // Close releases connections and the audit log.
@@ -175,6 +197,26 @@ func (s *Service) Describe(t *target.Target) map[string]string {
 	return t.Describe(login)
 }
 
+// record writes one audit line, filling in the target fields every record
+// shares. Used for intent records, which have no outcome yet.
+func (s *Service) record(ev audit.Event, t *target.Target, login string) error {
+	ev.Actor = s.cfg.Actor
+	if t != nil {
+		ev.Alias = t.Alias()
+		ev.Server = t.Addr()
+		ev.Database = t.Database()
+		ev.Mode = t.Mode().String()
+		ev.Login = login
+	}
+	if ev.Outcome == "" {
+		ev.Outcome = audit.OutcomeOK
+	}
+	if err := s.log.Write(ev); err != nil {
+		return fmt.Errorf("audit (%s): %w", s.log.Path(), err)
+	}
+	return nil
+}
+
 // finish records the outcome of an operation and returns the error the caller
 // should surface.
 //
@@ -204,6 +246,34 @@ func (s *Service) finish(ev audit.Event, t *target.Target, login string, opErr e
 		return fmt.Errorf("audit (%s): %w", s.log.Path(), err)
 	}
 	return opErr
+}
+
+// approvalDir puts pending approvals beside the snapshots rather than in the
+// same directory: a person listing pending requests should not have to read
+// past procedure bodies to find them.
+func approvalDir(snapshotDir string) string {
+	if strings.TrimSpace(snapshotDir) == "" {
+		return "~/.local/state/hrm-sql-mcp/approvals"
+	}
+	return filepath.Join(filepath.Dir(snapshotDir), "approvals")
+}
+
+// Approvals exposes the store so the approve subcommand can reach it.
+func (s *Service) Approvals() *approver.Store { return s.appr }
+
+// Snapshots exposes the pre-image store.
+func (s *Service) Snapshots() *snapshots.Store { return s.snaps }
+
+// writeLimits bounds a write. ExecuteTimeout rather than QueryTimeout: a
+// deployment legitimately takes longer than a select, and the lock timeout is
+// what protects other sessions in the meantime.
+func (s *Service) writeLimits() sqlrun.Limits {
+	return sqlrun.Limits{
+		MaxRows:     s.pol.Limits.MaxRows,
+		MaxBytes:    s.pol.Limits.MaxBytes,
+		Timeout:     s.pol.Limits.ExecuteTimeout,
+		LockTimeout: s.pol.Limits.LockTimeout,
+	}
 }
 
 // queryLimits converts the policy's limits into the ones sqlrun applies.

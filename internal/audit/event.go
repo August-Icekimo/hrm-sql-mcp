@@ -6,6 +6,22 @@ import (
 	"github.com/google/uuid"
 )
 
+// Phases recorded in Event.Phase.
+const (
+	// PhaseIntent is written before an operation acts, and is what makes a
+	// write path auditable at all.
+	//
+	// A record written only on completion disappears if the process dies
+	// mid-statement — and a write that was attempted, killed, and left no
+	// trace is the exact case an audit log exists to rule out. Two records
+	// sharing one correlation ID cost one extra line and remove that gap.
+	PhaseIntent = "intent"
+	// PhaseOutcome is written after the operation finishes, successfully or
+	// not. Read-only tools write only this one: nothing is at stake between
+	// intent and outcome when nothing changes.
+	PhaseOutcome = "outcome"
+)
+
 // Outcomes recorded in Event.Outcome.
 const (
 	// OutcomeOK means the operation completed.
@@ -41,6 +57,22 @@ type Event struct {
 	Actor string `json:"actor,omitempty"`
 	// Tool is the operation name, matching the MCP tool where there is one.
 	Tool string `json:"tool"`
+	// Phase is PhaseIntent or PhaseOutcome. Empty means a single-record
+	// operation, which is how every read-only tool writes.
+	Phase string `json:"phase,omitempty"`
+	// Classification labels the statement (select, update, ddl…). It is for
+	// reading the log, never for deciding what to allow; see package tsql.
+	Classification string `json:"classification,omitempty"`
+	// Approval is the correlation ID of the approval that authorised this,
+	// present on committed writes.
+	Approval string `json:"approval,omitempty"`
+	// Committed distinguishes a real write from a rolled-back rehearsal.
+	Committed bool `json:"committed,omitempty"`
+	// RowsAffected is what the write reported. On a rehearsal it is what the
+	// write *would* have affected, which is the number worth reviewing.
+	RowsAffected int64 `json:"rows_affected,omitempty"`
+	// SnapshotPath is where the pre-change definition was saved.
+	SnapshotPath string `json:"snapshot_path,omitempty"`
 
 	// The target, spelled out on every line. A log that says "500 rows read"
 	// without saying from which server answers nothing.

@@ -109,6 +109,18 @@ func (w *Writer) Write(ev Event) error {
 	if n != len(line) {
 		return fmt.Errorf("short audit write: %d of %d bytes", n, len(line))
 	}
+	// Durable before the caller proceeds. Without this the intent record for a
+	// write can still be sitting in the page cache when the statement runs, so
+	// a machine that loses power mid-write loses exactly the record explaining
+	// what was being attempted — the one case the log was written for.
+	//
+	// It costs a device round trip per record. That is affordable here: this
+	// is a developer tool doing a handful of operations a minute, not a
+	// transaction log, and buying back that time by risking the audit's
+	// completeness is a bad trade at any speed.
+	if err := w.f.Sync(); err != nil {
+		return fmt.Errorf("sync audit record: %w", err)
+	}
 	return nil
 }
 

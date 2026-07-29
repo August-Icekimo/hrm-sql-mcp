@@ -27,8 +27,9 @@ func cmdServe(args []string) error {
 	// stdout is the MCP transport, so every human-readable byte goes to
 	// stderr. A stray Println here would corrupt the JSON-RPC stream, and the
 	// client would report a protocol error with no hint of the real cause.
-	fmt.Fprintf(os.Stderr, "hrm-sql-mcp: profile=%s targets=%v audit=%s\n",
-		svc.Policy().Profile, svc.Aliases(), svc.AuditPath())
+	fmt.Fprintf(os.Stderr, "hrm-sql-mcp: profile=%s targets=%v\n  audit=%s\n  approvals=%s\n  snapshots=%s\n",
+		svc.Policy().Profile, svc.Aliases(), svc.AuditPath(),
+		svc.Approvals().Dir(), svc.Snapshots().Dir())
 
 	// The client closes stdin to shut us down, which Run already handles.
 	// Catching signals as well means a terminal Ctrl-C during manual testing
@@ -36,5 +37,10 @@ func cmdServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	return mcpserver.Run(ctx, mcpserver.New(svc))
+	// Write tools are added here rather than inside New, so that the set of
+	// tools that can change the database is visible at a call site instead of
+	// buried in a registration list.
+	srv := mcpserver.New(svc)
+	mcpserver.AddWriteTools(srv, svc)
+	return mcpserver.Run(ctx, srv)
 }

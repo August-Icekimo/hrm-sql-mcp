@@ -290,3 +290,119 @@ func TestExplainRejectsGarbage(t *testing.T) {
 		t.Error("explaining a statement against a missing table returned no error")
 	}
 }
+
+// TestExecRehearsalDoesNotPersist is the plan's verification item 5, and the
+// property the whole rehearsal idea rests on: rows_affected reports real work,
+// and afterwards nothing changed.
+func TestExecRehearsalDoesNotPersist(t *testing.T) {
+	db := testenv.OpenWritable(t)
+	ctx := context.Background()
+
+	// Pick a real row and remember its value.
+	res, err := sqlrun.Query(ctx, db,
+		"SELECT TOP 1 emp_no, ISNULL(remark, '') FROM ADVANCE_BONUS_GRANT ORDER BY emp_no", nil, sqlrun.Limits{})
+	if err != nil {
+		t.Fatalf("read a row: %v", err)
+	}
+	if len(res.Sets[0].Rows) == 0 {
+		t.Skip("no rows in ADVANCE_BONUS_GRANT")
+	}
+	empNo := res.Sets[0].Rows[0][0].(string)
+	before := res.Sets[0].Rows[0][1].(string)
+
+	const marker = "REHEARSAL-SHOULD-NOT-PERSIST"
+	stmt := "UPDATE ADVANCE_BONUS_GRANT SET remark = '" + marker + "' WHERE emp_no = '" + empNo + "'"
+
+	er, err := sqlrun.Exec(ctx, db, stmt, sqlrun.Limits{}, false)
+	if err != nil {
+		t.Fatalf("Exec rehearsal: %v", err)
+	}
+	if er.RowsAffected < 1 {
+		t.Errorf("rows_affected = %d; a rehearsal must report the work it would do", er.RowsAffected)
+	}
+	if er.Committed {
+		t.Error("a rehearsal reported itself as committed")
+	}
+	// The caveats are what stop "rolled back" being read as "safe".
+	if len(er.Caveats) != len(sqlrun.RehearsalCaveats) {
+		t.Errorf("rehearsal returned %d caveats, want %d", len(er.Caveats), len(sqlrun.RehearsalCaveats))
+	}
+
+	after, err := sqlrun.Query(ctx, db,
+		"SELECT ISNULL(remark, '') FROM ADVANCE_BONUS_GRANT WHERE emp_no = '"+empNo+"'", nil, sqlrun.Limits{})
+	if err != nil {
+		t.Fatalf("re-read the row: %v", err)
+	}
+	got := after.Sets[0].Rows[0][0].(string)
+	if got == marker {
+		t.Fatalf("the rehearsal persisted: remark is now %q", got)
+	}
+	if got != before {
+		t.Errorf("the row changed anyway: %q -> %q", before, got)
+	}
+}
+
+// TestExecCommitPersistsThenRestore proves the other half. Without it, a
+// rehearsal that silently did nothing would also pass the test above.
+func TestExecCommitPersistsThenRestore(t *testing.T) {
+	db := testenv.OpenWritable(t)
+	ctx := context.Background()
+
+	res, err := sqlrun.Query(ctx, db,
+		"SELECT TOP 1 emp_no, ISNULL(remark, '') FROM ADVANCE_BONUS_GRANT ORDER BY emp_no", nil, sqlrun.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Sets[0].Rows) == 0 {
+		t.Skip("no rows in ADVANCE_BONUS_GRANT")
+	}
+	empNo := res.Sets[0].Rows[0][0].(string)
+	before := res.Sets[0].Rows[0][1].(string)
+
+	const marker = "COMMIT-PROOF"
+	restore := func() {
+		stmt := "UPDATE ADVANCE_BONUS_GRANT SET remark = '" + before + "' WHERE emp_no = '" + empNo + "'"
+		if _, err := sqlrun.Exec(context.Background(), db, stmt, sqlrun.Limits{}, true); err != nil {
+			t.Errorf("could not restore %s: %v", empNo, err)
+		}
+	}
+	t.Cleanup(restore)
+
+	er, err := sqlrun.Exec(ctx, db,
+		"UPDATE ADVANCE_BONUS_GRANT SET remark = '"+marker+"' WHERE emp_no = '"+empNo+"'",
+		sqlrun.Limits{}, true)
+	if err != nil {
+		t.Fatalf("Exec commit: %v", err)
+	}
+	if !er.Committed || er.RowsAffected < 1 {
+		t.Fatalf("commit result = %+v", er)
+	}
+	if len(er.Caveats) != 0 {
+		t.Errorf("a committed write carries rehearsal caveats: %v", er.Caveats)
+	}
+
+	after, err := sqlrun.Query(ctx, db,
+		"SELECT remark FROM ADVANCE_BONUS_GRANT WHERE emp_no = '"+empNo+"'", nil, sqlrun.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Sets[0].Rows[0][0].(string); got != marker {
+		t.Errorf("commit did not persist: remark = %q", got)
+	}
+}
+
+// TestExecReadOnlyLoginStillCannotWrite: the write path must not become a way
+// around the read-only login. Exec on the ro connection is refused by the
+// server, not by anything here.
+func TestExecReadOnlyLoginStillCannotWrite(t *testing.T) {
+	db, _ := testenv.Open(t)
+	_, err := sqlrun.Exec(context.Background(), db,
+		"UPDATE ADVANCE_BONUS_GRANT SET remark = 'x' WHERE 1 = 0", sqlrun.Limits{}, true)
+	if err == nil {
+		t.Fatal("Exec succeeded on the read-only connection")
+	}
+	n, ok := sqlrun.ServerErrorNumber(err)
+	if !ok || n != 229 {
+		t.Errorf("err = %v (sql error %d, ok=%v), want server error 229", err, n, ok)
+	}
+}

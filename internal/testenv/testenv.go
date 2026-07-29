@@ -71,6 +71,48 @@ func Open(t *testing.T) (*sql.DB, *policy.Policy) {
 	return db, pol
 }
 
+// OpenWritable returns a read-write connection to the writable snapshot.
+//
+// Separate from Open so that a test which does not need write access cannot
+// get it by accident: most of this suite runs read-only, and the handful of
+// tests that mutate rows should be visible as such at the call site.
+//
+// Only hrm_0209 is marked writable in the policy; the other snapshots are
+// reference copies and Registry.Open refuses ReadWrite against them.
+func OpenWritable(t *testing.T) *sql.DB {
+	t.Helper()
+	if os.Getenv(EnvGate) == "" {
+		t.Skipf("set %s=1 to run integration tests against the local container", EnvGate)
+	}
+
+	pol, err := policy.Load(PolicyPath())
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	store, err := config.LoadCredentials(cfg.CredentialsPath)
+	if err != nil {
+		t.Fatalf("load credentials: %v", err)
+	}
+	reg, err := target.NewRegistry(pol, pol.Profile, store.Credentials())
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	t.Cleanup(func() { reg.Close() })
+
+	db, _, err := reg.Open(context.Background(), Alias, target.ReadWrite)
+	if err != nil {
+		t.Fatalf("open %s read-write: %v", Alias, err)
+	}
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("ping %s (is the container running?): %v", Alias, err)
+	}
+	return db
+}
+
 // PolicyPath locates testdata/local.yaml relative to this source file, so the
 // tests do not depend on which directory `go test` was invoked from.
 func PolicyPath() string {

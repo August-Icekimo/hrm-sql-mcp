@@ -15,7 +15,7 @@ import (
 
 func cmdSP(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("sp needs a subcommand: list, get, diff or audit")
+		return fmt.Errorf("sp needs a subcommand: list, get, diff, audit or deploy")
 	}
 	switch args[0] {
 	case "list":
@@ -26,8 +26,10 @@ func cmdSP(args []string) error {
 		return cmdSPDiff(args[1:])
 	case "audit":
 		return cmdSPAudit(args[1:])
+	case "deploy":
+		return cmdSPDeploy(args[1:])
 	default:
-		return fmt.Errorf("unknown sp subcommand %q (try: list, get, diff, audit)", args[0])
+		return fmt.Errorf("unknown sp subcommand %q (try: list, get, diff, audit, deploy)", args[0])
 	}
 }
 
