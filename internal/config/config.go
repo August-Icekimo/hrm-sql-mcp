@@ -19,8 +19,19 @@ type Config struct {
 	Profile string `env:"HRM_SQL_MCP_PROFILE"`
 	// CredentialsPath is the 0600 file holding the two logins.
 	CredentialsPath string `env:"HRM_SQL_MCP_CREDENTIALS" envDefault:"~/.config/hrm-sql-mcp/credentials.env"`
+	// ProjectRoot is what the policy's relative paths (sp_dir, java_src_dir)
+	// resolve against. It defaults to the working directory because that is
+	// where an MCP client spawns the server — the same assumption that lets
+	// .mcp.json say `--policy mcp/hrm-sql.yaml` without a machine-specific
+	// absolute path.
+	ProjectRoot string `env:"HRM_SQL_MCP_PROJECT_ROOT" envDefault:"."`
 	// LogLevel sets the slog level.
 	LogLevel string `env:"HRM_SQL_MCP_LOG_LEVEL" envDefault:"info"`
+	// Actor names who is driving the tool, and lands in every audit record.
+	// The MCP client registrations set it so that one shared log can still
+	// answer "which agent ran this", which the PID alone cannot once the
+	// process has exited.
+	Actor string `env:"HRM_SQL_MCP_ACTOR" envDefault:"cli"`
 }
 
 // Load parses the environment.
