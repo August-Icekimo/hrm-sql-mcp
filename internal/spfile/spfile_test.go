@@ -119,6 +119,26 @@ ALTER PROC sp_second AS SELECT 2
 	if !strings.Contains(s.Definition, "sp_Real_One") {
 		t.Errorf("definition should be the first proc batch, got %q", s.Definition)
 	}
+
+	// Every procedure needs its own batch, not just the first. Keeping only
+	// the first would leave sp_second listed in the inventory with nothing to
+	// compare against, which reads as "checked" when it was not.
+	if len(s.Definitions) != len(want) {
+		t.Fatalf("definitions = %d, want %d", len(s.Definitions), len(want))
+	}
+	second, ok := s.DefinitionOf("sp_second")
+	if !ok {
+		t.Fatal("no definition captured for sp_second")
+	}
+	if !strings.Contains(second.Text, "SELECT 2") {
+		t.Errorf("sp_second definition = %q, want its own batch", second.Text)
+	}
+	if strings.Contains(second.Text, "sp_Real_One") {
+		t.Error("sp_second picked up the previous procedure's batch")
+	}
+	if _, ok := s.DefinitionOf("sp_not_here"); ok {
+		t.Error("DefinitionOf returned a definition for a procedure this file does not define")
+	}
 }
 
 // TestNormalizeIsRestrained is the important one. A normaliser that is too

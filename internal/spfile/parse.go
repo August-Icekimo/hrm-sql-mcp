@@ -22,11 +22,38 @@ type Script struct {
 	Encoding string
 	// Procs lists every procedure this file defines, lower-cased.
 	Procs []string
-	// Definition is the batch containing the first CREATE/ALTER PROCEDURE,
-	// which is what sys.sql_modules stores for comparison.
+	// Definitions holds one entry per procedure, in file order.
+	//
+	// Per procedure rather than per file because a handful of these scripts
+	// define several: keeping only the first would leave the rest present in
+	// the inventory but uncomparable, which reads as "we checked" when we did
+	// not.
+	Definitions []Definition
+	// Definition is the batch defining the first procedure, which is the
+	// common case and the one sys.sql_modules stores for it.
 	Definition string
 	// DefinitionLine is where that batch starts in the file.
 	DefinitionLine int
+}
+
+// Definition is one procedure's defining batch.
+type Definition struct {
+	// Name is lower-cased, matching Script.Procs.
+	Name string
+	// Text is the batch as written, before normalisation.
+	Text string
+	// Line is the 1-based line the batch starts on.
+	Line int
+}
+
+// DefinitionOf returns the batch defining name, which must be lower-cased.
+func (s *Script) DefinitionOf(name string) (Definition, bool) {
+	for _, d := range s.Definitions {
+		if d.Name == name {
+			return d, true
+		}
+	}
+	return Definition{}, false
 }
 
 // ParseFile reads and parses one script.
@@ -61,6 +88,9 @@ func ParseText(text string) *Script {
 		if _, dup := seen[name]; !dup {
 			seen[name] = struct{}{}
 			s.Procs = append(s.Procs, name)
+			s.Definitions = append(s.Definitions, Definition{
+				Name: name, Text: b.Text, Line: b.StartLine,
+			})
 		}
 		if s.Definition == "" {
 			s.Definition = b.Text
