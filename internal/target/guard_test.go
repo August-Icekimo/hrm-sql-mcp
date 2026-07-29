@@ -34,13 +34,13 @@ func (f fakeResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Ad
 
 func resolver() fakeResolver {
 	return fakeResolver{m: map[string][]string{
-		"172.16.3.34":       {"172.16.3.34"},   // production, denied by host and CIDR
-		"172.22.1.130":      {"172.22.1.130"},  // UAT, allowed
-		"127.0.0.1":         {"127.0.0.1"},     // local container
-		"localhost":         {"127.0.0.1"},
-		"prod.example.test": {"172.16.3.34"},   // innocuous name, production address
-		"split.example.test": {"172.22.1.130", "172.16.3.34"}, // one good, one bad
-		"outside.example.test": {"203.0.113.9"}, // resolves, but outside allow_cidrs
+		"172.16.3.34":          {"172.16.3.34"},  // production, denied by host and CIDR
+		"172.22.1.130":         {"172.22.1.130"}, // UAT, allowed
+		"127.0.0.1":            {"127.0.0.1"},    // local container
+		"localhost":            {"127.0.0.1"},
+		"prod.example.test":    {"172.16.3.34"},                 // innocuous name, production address
+		"split.example.test":   {"172.22.1.130", "172.16.3.34"}, // one good, one bad
+		"outside.example.test": {"203.0.113.9"},                 // resolves, but outside allow_cidrs
 	}}
 }
 
