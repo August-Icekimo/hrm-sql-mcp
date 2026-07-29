@@ -34,8 +34,11 @@ type targetsOut struct {
 
 func addTargets(srv *mcp.Server, svc *service.Service) {
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "mssql_targets",
-		Description: "List the databases this project may reach, and whether each currently passes the connection guard. Call this first: every other tool needs an alias from here.",
+		Name: "mssql_targets",
+		Description: "List the databases this project may reach, and whether each currently passes the connection guard. " +
+			"Call this first: every other tool needs an alias from here. " +
+			"Targets are point-in-time restores, not copies of production — the snapshot dates say which week of data each holds, " +
+			"and a finding from one target does not carry over to another.",
 		Annotations: readOnly("Show reachable databases"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ targetsIn) (*mcp.CallToolResult, targetsOut, error) {
 		out := targetsOut{Profile: svc.Policy().Profile, Targets: svc.Targets(ctx)}
@@ -49,6 +52,12 @@ func addTargets(srv *mcp.Server, svc *service.Service) {
 			}
 			fmt.Fprintf(&b, "%-14s %s/%s  writable=%t  connect=%s\n",
 				t.Alias, t.Server, t.Database, t.Writable, t.Connect)
+			if t.Snapshot != nil {
+				fmt.Fprintf(&b, "               %s\n", t.Snapshot)
+			}
+			if t.Note != "" {
+				fmt.Fprintf(&b, "               %s\n", t.Note)
+			}
 		}
 		return text(b.String()), out, nil
 	})

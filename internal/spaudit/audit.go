@@ -120,6 +120,10 @@ type Report struct {
 	// Target describes the database, so a report can never be mistaken for one
 	// taken against a different server.
 	Target map[string]string
+	// Snapshot dates the database the audit ran against. Without it a report
+	// says which server it came from but not which week of data, and every
+	// finding in it is only true as of some moment.
+	Snapshot string
 	// SPDir and JavaDir are the scanned paths, as given.
 	SPDir, JavaDir string
 

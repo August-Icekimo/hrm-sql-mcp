@@ -34,11 +34,15 @@ func (rep *Report) Markdown(opts MarkdownOptions) string {
 
 	b.WriteString("# Stored Procedure 盤點\n\n")
 	b.WriteString("> ⚠ 本檔由 `hrm-sql-mcp sp audit --format markdown` 產生，請勿手動編輯。\n")
-	b.WriteString("> 三方比對：`Stored Procedure/` 原始檔 × 資料庫 `sys.sql_modules` × Java 呼叫點。\n\n")
+	b.WriteString("> 三方比對：`Stored Procedure/` 原始檔 × 資料庫 `sys.sql_modules` × Java 呼叫點。\n")
+	b.WriteString("> ⚠ 結論只對下表這一份快照成立。測試快照彼此只差在時間點，都不是正式環境的完整還原。\n\n")
 
 	b.WriteString("| 項目 | 值 |\n| :--- | :--- |\n")
 	for _, k := range sortedKeys(rep.Target) {
 		fmt.Fprintf(&b, "| %s | `%s` |\n", targetLabel(k), rep.Target[k])
+	}
+	if rep.Snapshot != "" {
+		fmt.Fprintf(&b, "| 資料快照 | %s |\n", rep.Snapshot)
 	}
 	fmt.Fprintf(&b, "| 原始檔目錄 | `%s` |\n", rep.SPDir)
 	fmt.Fprintf(&b, "| Java 來源 | `%s`（%d 個檔案） |\n", rep.JavaDir, rep.JavaFiles)

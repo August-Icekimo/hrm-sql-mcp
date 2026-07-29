@@ -28,6 +28,11 @@ type TargetStatus struct {
 	// one never look the same.
 	Connect string `json:"connect"`
 	Reason  string `json:"reason,omitempty"`
+	// Note is the policy's description of what this target is.
+	Note string `json:"note,omitempty"`
+	// Snapshot dates the data. Two targets can differ only in when they were
+	// taken, which is invisible from the alias alone.
+	Snapshot *spdb.Snapshot `json:"snapshot,omitempty"`
 }
 
 // Targets reports every declared target with its guard and connection status.
@@ -35,7 +40,7 @@ func (s *Service) Targets(ctx context.Context) []TargetStatus {
 	out := make([]TargetStatus, 0, len(s.pol.Targets))
 	for _, alias := range s.Aliases() {
 		pt, _ := s.pol.TargetByAlias(alias)
-		st := TargetStatus{Alias: alias, Writable: pt.Writable, Guard: "rejected", Connect: "-"}
+		st := TargetStatus{Alias: alias, Writable: pt.Writable, Guard: "rejected", Connect: "-", Note: pt.Note}
 
 		t, err := s.reg.Check(ctx, alias, target.ReadOnly)
 		if err != nil {
@@ -54,6 +59,9 @@ func (s *Service) Targets(ctx context.Context) []TargetStatus {
 				st.Connect = "FAIL: " + perr.Error()
 			} else {
 				st.Connect = "ok"
+				if snap, serr := spdb.SnapshotOf(ctx, db); serr == nil {
+					st.Snapshot = &snap
+				}
 			}
 		}
 		out = append(out, st)
@@ -316,6 +324,9 @@ func (s *Service) SPAudit(ctx context.Context, alias string) (*spaudit.Report, *
 		DiffContext:    3,
 	})
 	rep.Target = t.Describe(login)
+	if snap, serr := spdb.SnapshotOf(cctx, db); serr == nil {
+		rep.Snapshot = snap.String()
+	}
 	rep.SPDir = s.pol.Paths.SPDir
 	rep.JavaDir = s.pol.Paths.JavaSrcDir
 

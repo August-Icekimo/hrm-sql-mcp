@@ -2,6 +2,10 @@
 #
 # 正式的政策檔住在被服務的專案裡（HRM 是 mcp/hrm-sql.yaml）。
 # 這一份留在 repo 內只作為開發與整合測試用的樣本。
+#
+# 三個目標是同一台伺服器上不同時間點的測試快照，彼此只差在時間點與測試對象，
+# 都不是正式環境的完整還原。宣告成多個目標是為了能互相比對——一個發現究竟是
+# 缺陷，還是「那份快照的時間比較早」，只有並排看才分得出來。
 server:
   name: hrm-sql-mcp
   version: 0.1.0
@@ -9,10 +13,14 @@ server:
 profile: local
 
 targets:
-  - alias: local_hrm
+  - alias: hrm_0209
     host: 127.0.0.1
     port: 1433
     database: hrm
+    note: "2026-02-09 還原的測試快照"
+    # 三個目標共用同一個登入。沒有這個欄位就要把同一組帳密在憑證檔裡抄三遍，
+    # 而抄三遍的密碼是輪替時會漏掉兩份的密碼。
+    credential_key: local_hrm
     # 容器只綁本機，allow_cidrs 收得比實際更緊沒有壞處
     allow_cidrs: ["127.0.0.0/8"]
     encrypt: true
@@ -21,6 +29,30 @@ targets:
     trust_server_certificate: true
     app_name: hrm-sql-mcp
     writable: true
+
+  - alias: hrm_0424
+    host: 127.0.0.1
+    port: 1433
+    database: hrm_0424
+    note: "2026-04-27 還原的測試快照"
+    credential_key: local_hrm
+    allow_cidrs: ["127.0.0.0/8"]
+    encrypt: true
+    trust_server_certificate: true
+    app_name: hrm-sql-mcp
+    writable: false
+
+  - alias: hrm_0511
+    host: 127.0.0.1
+    port: 1433
+    database: hrm_0511
+    note: "2026-05-22 還原的測試快照（程序數明顯較少，形狀與另外兩份不同）"
+    credential_key: local_hrm
+    allow_cidrs: ["127.0.0.0/8"]
+    encrypt: true
+    trust_server_certificate: true
+    app_name: hrm-sql-mcp
+    writable: false
 
 limits:
   max_rows: 500

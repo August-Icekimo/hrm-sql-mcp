@@ -26,8 +26,14 @@ import (
 // container from the README, so they are opt-in rather than skipped-by-guess.
 const EnvGate = "HRM_SQL_MCP_IT"
 
-// Alias is the local development target declared in testdata/local.yaml.
-const Alias = "local_hrm"
+// Alias is the primary local development target declared in testdata/local.yaml.
+//
+// The policy declares three snapshots of the same database taken at different
+// times. Tests use this one; AliasOther is for anything comparing across them.
+const Alias = "hrm_0209"
+
+// AliasOther is a second snapshot on the same server, for comparison tests.
+const AliasOther = "hrm_0424"
 
 // Open returns a read-only connection to the local development database,
 // skipping the test when the gate is not set.

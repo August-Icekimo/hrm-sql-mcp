@@ -16,9 +16,13 @@ import (
 // Credentials supplies the two logins. Values come from a 0600 file outside
 // any repository; see package config.
 type Credentials struct {
-	// Lookup returns user and password for an alias and mode.
-	// Returning ok=false must be treated as "no credential, do not connect".
-	Lookup func(alias string, mode AccessMode) (user, password string, ok bool)
+	// Lookup returns user and password for a credential key and mode.
+	//
+	// The key is the policy target's credential_key, which defaults to its
+	// alias but need not equal it: several targets on one server share a
+	// login. Returning ok=false must be treated as "no credential, do not
+	// connect".
+	Lookup func(key string, mode AccessMode) (user, password string, ok bool)
 }
 
 // Registry is the sole factory for connections.
@@ -112,12 +116,15 @@ func (r *Registry) Open(ctx context.Context, alias string, mode AccessMode) (*sq
 		return nil, nil, err
 	}
 
-	user, password, ok := r.creds.Lookup(alias, mode)
+	pt, _ := r.pol.TargetByAlias(alias)
+
+	user, password, ok := r.creds.Lookup(pt.CredentialKey, mode)
 	if !ok {
-		return nil, nil, fmt.Errorf("no %s credential configured for target %q", mode, alias)
+		return nil, nil, fmt.Errorf(
+			"no %s credential configured for target %q (looked for credential key %q)",
+			mode, alias, pt.CredentialKey)
 	}
 
-	pt, _ := r.pol.TargetByAlias(alias)
 	encrypt := pt.Encrypt == nil || *pt.Encrypt
 
 	key := alias + "/" + mode.String()

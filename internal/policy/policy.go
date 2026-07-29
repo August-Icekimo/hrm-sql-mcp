@@ -56,6 +56,19 @@ type Target struct {
 	// AppName appears in sys.dm_exec_sessions.program_name so a DBA can tell
 	// our connections apart from the application's.
 	AppName string `yaml:"app_name"`
+	// CredentialKey selects which credential entry this target uses, defaulting
+	// to the alias.
+	//
+	// It exists because several targets routinely share one login: the test
+	// snapshots hrm, hrm_0424 and hrm_0511 live on one server behind the same
+	// hrm_mcp_ro. Keying credentials by alias alone would mean copying the same
+	// password into the credentials file once per snapshot, and a password
+	// stored three times is one that gets rotated twice.
+	CredentialKey string `yaml:"credential_key"`
+	// Note is free text describing what this target is — which snapshot, taken
+	// when, for which test. The server can report when a database was created;
+	// only a person can say what it was for.
+	Note string `yaml:"note"`
 	// Writable allows the read-write login to be used against this target.
 	// Read-only tools ignore it.
 	Writable bool `yaml:"writable"`
@@ -127,6 +140,9 @@ func (p *Policy) applyDefaults() {
 		p.Audit.File = DefaultAuditFile
 	}
 	for i := range p.Targets {
+		if p.Targets[i].CredentialKey == "" {
+			p.Targets[i].CredentialKey = p.Targets[i].Alias
+		}
 		if p.Targets[i].Port == 0 {
 			p.Targets[i].Port = 1433
 		}

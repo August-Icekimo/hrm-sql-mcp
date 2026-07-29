@@ -103,16 +103,17 @@ func LoadCredentials(path string) (*Store, error) {
 	return &Store{kv: kv}, nil
 }
 
-// Lookup returns the user and password for an alias and access mode.
+// Lookup returns the user and password for a credential key and access mode.
 //
-// A missing entry returns ok=false, which callers must treat as "do not
-// connect" — never as "connect without credentials".
-func (s *Store) Lookup(alias string, mode target.AccessMode) (string, string, bool) {
+// The key comes from the policy target's credential_key, so several targets
+// can share one entry. A missing entry returns ok=false, which callers must
+// treat as "do not connect" — never as "connect without credentials".
+func (s *Store) Lookup(key string, mode target.AccessMode) (string, string, bool) {
 	suffix := "RO"
 	if mode == target.ReadWrite {
 		suffix = "RW"
 	}
-	base := "HRM_SQL_" + strings.ToUpper(alias) + "_" + suffix
+	base := "HRM_SQL_" + strings.ToUpper(key) + "_" + suffix
 	user, uok := s.kv[base+"_USER"]
 	pass, pok := s.kv[base+"_PASSWORD"]
 	if !uok || !pok || user == "" || pass == "" {
