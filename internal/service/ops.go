@@ -33,6 +33,13 @@ type TargetStatus struct {
 	// Snapshot dates the data. Two targets can differ only in when they were
 	// taken, which is invisible from the alias alone.
 	Snapshot *spdb.Snapshot `json:"snapshot,omitempty"`
+	// CredentialFrom says where the read-only login was found — "env",
+	// "file:<path>", or "MISSING". Never the credential itself.
+	//
+	// Worth a column because "no login configured" and "login configured but
+	// the server refused it" produce different next actions, and without this
+	// they arrive looking identical.
+	CredentialFrom string `json:"credential_from,omitempty"`
 }
 
 // Targets reports every declared target with its guard and connection status.
@@ -41,6 +48,11 @@ func (s *Service) Targets(ctx context.Context) []TargetStatus {
 	for _, alias := range s.Aliases() {
 		pt, _ := s.pol.TargetByAlias(alias)
 		st := TargetStatus{Alias: alias, Writable: pt.Writable, Guard: "rejected", Connect: "-", Note: pt.Note}
+		if from, ok := s.creds.Origin(pt.CredentialKey, target.ReadOnly); ok {
+			st.CredentialFrom = from
+		} else {
+			st.CredentialFrom = "MISSING"
+		}
 
 		t, err := s.reg.Check(ctx, alias, target.ReadOnly)
 		if err != nil {
@@ -290,24 +302,11 @@ func (s *Service) SPAudit(ctx context.Context, alias string) (*spaudit.Report, *
 	}
 	login := s.login(ctx, db, t.Alias())
 
-	spDir := s.ProjectPath(s.pol.Paths.SPDir)
-	javaDir := s.ProjectPath(s.pol.Paths.JavaSrcDir)
-
-	scripts, failures, serr := spfile.ScanDir(spDir)
+	src, serr := s.scanLocalSources()
 	if serr != nil {
-		return nil, t, s.finish(audit.Event{Tool: tool}, t, login, fmt.Errorf("scan %s: %w", spDir, serr))
+		return nil, t, s.finish(audit.Event{Tool: tool}, t, login, serr)
 	}
-	// Every path in the report is project-relative. The absolute paths this
-	// process happens to use would bake one developer's home directory into a
-	// file that other people read.
-	for _, sc := range scripts {
-		sc.Path = filepath.Join(s.pol.Paths.SPDir, filepath.Base(sc.Path))
-	}
-
-	java, jerr := javascan.Scan(javaDir, javascan.Options{PathPrefix: s.pol.Paths.JavaSrcDir})
-	if jerr != nil {
-		return nil, t, s.finish(audit.Event{Tool: tool}, t, login, fmt.Errorf("scan %s: %w", javaDir, jerr))
-	}
+	scripts, java, failures := src.scripts, src.java, src.failures
 
 	cctx, cancel := s.catalogContext(ctx)
 	defer cancel()
@@ -334,6 +333,73 @@ func (s *Service) SPAudit(ctx context.Context, alias string) (*spaudit.Report, *
 		return nil, t, err
 	}
 	return rep, t, nil
+}
+
+// SPAuditOffline compares only the two sources that need no server: the
+// scripts in Stored Procedure/ and the Java call sites.
+//
+// This exists so the audit can gate a push from a machine with no container
+// running and no credentials on it. It cannot answer whether anything is
+// deployed or current, and the report it returns says so on its face rather
+// than leaving a reader to infer it from a short findings list.
+func (s *Service) SPAuditOffline(ctx context.Context) (*spaudit.Report, error) {
+	const tool = "mssql_sp_audit_offline"
+	// A distinct tool name, not a flag on the same one. Somebody reading the
+	// audit log later needs to tell "compared against the database" from
+	// "compared against nothing of the sort" without reconstructing the flags.
+	src, serr := s.scanLocalSources()
+	if serr != nil {
+		return nil, s.finish(audit.Event{Tool: tool}, nil, "", serr)
+	}
+
+	rep := spaudit.Build(spaudit.Inputs{
+		Scripts:        src.scripts,
+		Java:           src.java,
+		ScriptFailures: src.failures,
+		DiffContext:    3,
+		NoDB:           true,
+	})
+	rep.SPDir = s.pol.Paths.SPDir
+	rep.JavaDir = s.pol.Paths.JavaSrcDir
+
+	if err := s.finish(audit.Event{Tool: tool, Rows: len(rep.Rows)}, nil, "", nil); err != nil {
+		return nil, err
+	}
+	return rep, nil
+}
+
+// localSources is what both audit lanes read off the filesystem.
+type localSources struct {
+	scripts  []*spfile.Script
+	java     *javascan.Result
+	failures map[string]error
+}
+
+// scanLocalSources reads the scripts and the Java tree. Shared so the offline
+// lane cannot drift from the full one in what it scans or how it reports it —
+// a divergence there would make the two reports quietly incomparable.
+func (s *Service) scanLocalSources() (localSources, error) {
+	var out localSources
+	spDir := s.ProjectPath(s.pol.Paths.SPDir)
+	javaDir := s.ProjectPath(s.pol.Paths.JavaSrcDir)
+
+	scripts, failures, err := spfile.ScanDir(spDir)
+	if err != nil {
+		return out, fmt.Errorf("scan %s: %w", spDir, err)
+	}
+	// Every path in the report is project-relative. The absolute paths this
+	// process happens to use would bake one developer's home directory into a
+	// file that other people read.
+	for _, sc := range scripts {
+		sc.Path = filepath.Join(s.pol.Paths.SPDir, filepath.Base(sc.Path))
+	}
+
+	java, err := javascan.Scan(javaDir, javascan.Options{PathPrefix: s.pol.Paths.JavaSrcDir})
+	if err != nil {
+		return out, fmt.Errorf("scan %s: %w", javaDir, err)
+	}
+	out.scripts, out.java, out.failures = scripts, java, failures
+	return out, nil
 }
 
 // relPath trims the project root so reports are portable between machines.

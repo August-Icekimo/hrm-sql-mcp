@@ -34,10 +34,20 @@ func (rep *Report) Markdown(opts MarkdownOptions) string {
 
 	b.WriteString("# Stored Procedure 盤點\n\n")
 	b.WriteString("> ⚠ 本檔由 `hrm-sql-mcp sp audit --format markdown` 產生，請勿手動編輯。\n")
-	b.WriteString("> 三方比對：`Stored Procedure/` 原始檔 × 資料庫 `sys.sql_modules` × Java 呼叫點。\n")
-	b.WriteString("> ⚠ 結論只對下表這一份快照成立。測試快照彼此只差在時間點，都不是正式環境的完整還原。\n\n")
+	if rep.Offline {
+		b.WriteString("> **這是離線盤點：只比對了兩方**——`Stored Procedure/` 原始檔 × Java 呼叫點。\n")
+		b.WriteString("> ⚠ **資料庫沒有被查詢過。** 因此「哪些已部署」「檔案是不是實際在跑的版本」" +
+			"「有沒有無主的程序在線上」這三個問題，本報告一律沒有回答，也不該被讀成沒有問題。" +
+			"完整結論要在連得到資料庫的機器上重跑一次。\n\n")
+	} else {
+		b.WriteString("> 三方比對：`Stored Procedure/` 原始檔 × 資料庫 `sys.sql_modules` × Java 呼叫點。\n")
+		b.WriteString("> ⚠ 結論只對下表這一份快照成立。測試快照彼此只差在時間點，都不是正式環境的完整還原。\n\n")
+	}
 
 	b.WriteString("| 項目 | 值 |\n| :--- | :--- |\n")
+	if rep.Offline {
+		b.WriteString("| 比對範圍 | 離線（**未查詢資料庫**） |\n")
+	}
 	for _, k := range sortedKeys(rep.Target) {
 		fmt.Fprintf(&b, "| %s | `%s` |\n", targetLabel(k), rep.Target[k])
 	}
@@ -50,12 +60,12 @@ func (rep *Report) Markdown(opts MarkdownOptions) string {
 		fmt.Fprintf(&b, "| 產生時間 | %s |\n", rep.Generated.Format("2006-01-02 15:04:05 -0700"))
 	}
 	b.WriteString("\n## 摘要\n\n| 狀態 | 數量 | 意義 |\n| :--- | ---: | :--- |\n")
-	for _, s := range Order {
+	for _, s := range rep.Statuses() {
 		fmt.Fprintf(&b, "| `%s` | %d | %s |\n", s, rep.Counts[s], Explain(s))
 	}
 	fmt.Fprintf(&b, "| **合計** | **%d** | |\n", len(rep.Rows))
 
-	for _, s := range Order {
+	for _, s := range rep.Statuses() {
 		rows := rep.ByStatus(s)
 		if len(rows) == 0 {
 			continue
@@ -69,15 +79,18 @@ func (rep *Report) Markdown(opts MarkdownOptions) string {
 
 func writeSection(b *strings.Builder, s Status, rows []Row, opts MarkdownOptions) {
 	heading := "## `" + string(s) + "` — " + Explain(s)
-	if s == StatusGhost {
+	switch s {
+	case StatusGhost:
 		heading = "## ⚠ `ghost` — " + Explain(s)
+	case StatusMissingScript:
+		heading = "## ⚠ `missing-script` — " + Explain(s)
 	}
 	fmt.Fprintf(b, "\n%s\n\n", heading)
 
 	// The identical list is long and, by definition, uninteresting. Folding it
 	// keeps the document skimmable without dropping the evidence that the
-	// audit looked at those procedures too.
-	fold := s == StatusIdentical && len(rows) > 20
+	// audit looked at those procedures too. scripted is its offline twin.
+	fold := (s == StatusIdentical || s == StatusScripted) && len(rows) > 20
 	if fold {
 		fmt.Fprintf(b, "<details><summary>展開 %d 筆</summary>\n\n", len(rows))
 	}
@@ -114,6 +127,23 @@ func writeSection(b *strings.Builder, s Status, rows []Row, opts MarkdownOptions
 		b.WriteString("| 程序 | 原始檔 | 資料庫最後修改 |\n| :--- | :--- | :--- |\n")
 		for _, r := range rows {
 			fmt.Fprintf(b, "| `%s` | %s | %s |\n", r.Name, filePath(r), ts(r.DBModified))
+		}
+	case StatusMissingScript:
+		b.WriteString("| 程序 | Java 呼叫點 |\n| :--- | :--- |\n")
+		for _, r := range rows {
+			fmt.Fprintf(b, "| `%s` | %s |\n", r.Name, sites(r.Calls(), 3))
+		}
+	case StatusUnreferenced:
+		b.WriteString("| 程序 | 原始檔 | 編碼 |\n| :--- | :--- | :--- |\n")
+		for _, r := range rows {
+			fmt.Fprintf(b, "| `%s` | %s | %s |\n", r.Name, filePath(r), r.FileEncoding)
+		}
+	case StatusScripted:
+		// No database column: offline there is nothing true to put in one, and
+		// an empty column reads as "never deployed" rather than "not asked".
+		b.WriteString("| 程序 | 原始檔 | Java 引用 |\n| :--- | :--- | :--- |\n")
+		for _, r := range rows {
+			fmt.Fprintf(b, "| `%s` | %s | %s |\n", r.Name, filePath(r), refCount(r))
 		}
 	default: // orphan, identical
 		b.WriteString("| 程序 | 原始檔 | 資料庫最後修改 | Java 引用 |\n| :--- | :--- | :--- | :--- |\n")

@@ -103,21 +103,46 @@ type Audit struct {
 // DefaultAuditFile is used when the policy does not name one.
 const DefaultAuditFile = "~/.local/state/hrm-sql-mcp/audit.jsonl"
 
-// Load reads and validates a policy file.
+// Load reads and validates a policy file, with no overrides applied.
 func Load(path string) (*Policy, error) {
+	p, _, err := LoadWithOverrides(path, nil)
+	return p, err
+}
+
+// LoadWithOverrides reads a policy file, lets the environment rewrite it, and
+// only then validates.
+//
+// The ordering is the point. Overrides can reach every guard-relevant field,
+// so Validate has to run on what will actually be used; validating the file as
+// shipped would certify a configuration that no connection uses. The returned
+// overrides are for display — see Override.
+func LoadWithOverrides(path string, src Source) (*Policy, []Override, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read policy %s: %w", path, err)
+		return nil, nil, fmt.Errorf("read policy %s: %w", path, err)
 	}
 	var p Policy
 	if err := yaml.Unmarshal(raw, &p); err != nil {
-		return nil, fmt.Errorf("parse policy %s: %w", path, err)
+		return nil, nil, fmt.Errorf("parse policy %s: %w", path, err)
 	}
 	p.applyDefaults()
-	if err := p.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid policy %s: %w", path, err)
+
+	applied, err := ApplyOverrides(&p, src)
+	if err != nil {
+		return nil, nil, fmt.Errorf("policy override: %w", err)
 	}
-	return &p, nil
+
+	if err := p.Validate(); err != nil {
+		if len(applied) > 0 {
+			// Say that overrides were in play. Otherwise the reader goes to
+			// the file, finds it correct, and has no reason to suspect the
+			// environment.
+			return nil, nil, fmt.Errorf("invalid policy %s (after %d override(s), see `hrm-sql-mcp targets`): %w",
+				path, len(applied), err)
+		}
+		return nil, nil, fmt.Errorf("invalid policy %s: %w", path, err)
+	}
+	return &p, applied, nil
 }
 
 func (p *Policy) applyDefaults() {

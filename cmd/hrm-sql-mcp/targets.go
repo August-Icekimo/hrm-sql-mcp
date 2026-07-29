@@ -24,21 +24,33 @@ func cmdTargets(_ []string) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "PROFILE\t%s\n\n", svc.Policy().Profile)
-	fmt.Fprintln(w, "ALIAS\tSERVER\tDATABASE\tWRITABLE\tGUARD\tCONNECT\tSNAPSHOT")
+	fmt.Fprintln(w, "ALIAS\tSERVER\tDATABASE\tWRITABLE\tGUARD\tCONNECT\tLOGIN\tSNAPSHOT")
 	for _, t := range targets {
 		if t.Guard != "pass" {
-			fmt.Fprintf(w, "%s\t-\t-\t-\tREJECTED\t%s\t\n", t.Alias, t.Reason)
+			fmt.Fprintf(w, "%s\t-\t-\t-\tREJECTED\t%s\t\t\n", t.Alias, t.Reason)
 			continue
 		}
 		snap := "-"
 		if t.Snapshot != nil {
 			snap = t.Snapshot.String()
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%t\tpass\t%s\t%s\n",
-			t.Alias, t.Server, t.Database, t.Writable, t.Connect, snap)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%t\tpass\t%s\t%s\t%s\n",
+			t.Alias, t.Server, t.Database, t.Writable, t.Connect, t.CredentialFrom, snap)
 	}
 	if err := w.Flush(); err != nil {
 		return err
+	}
+
+	// Overrides are printed in full, every time, with no way to suppress them.
+	// The moment host and database can come from three places, a listing that
+	// showed only the resolved values would answer "what will this connect to"
+	// but not "why", and the second question is the one asked at 2am.
+	if ov := svc.Overrides(); len(ov) > 0 {
+		fmt.Fprintf(os.Stderr, "\n-- %d 項組態被政策檔以外的來源覆寫：\n", len(ov))
+		for _, o := range ov {
+			fmt.Fprintf(os.Stderr, "   %s\n", o)
+		}
+		fmt.Fprintln(os.Stderr, "-- 編譯期的正式機黑名單不受這些覆寫影響。")
 	}
 	// The note says what a snapshot is for; the dates say when it is from.
 	// Neither is derivable from the alias, and picking the wrong one is the

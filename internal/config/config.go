@@ -1,13 +1,11 @@
 package config
 
 import (
-	"bufio"
-	"fmt"
-	"os"
 	"strings"
 
 	"github.com/caarlos0/env/v11"
 
+	"github.com/codex-k8s/hrm-sql-mcp/internal/envcfg"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/target"
 )
 
@@ -18,7 +16,19 @@ type Config struct {
 	// Profile must be stated explicitly; there is no default on purpose.
 	Profile string `env:"HRM_SQL_MCP_PROFILE"`
 	// CredentialsPath is the 0600 file holding the two logins.
+	//
+	// No longer the only way to supply them: the same keys are read from the
+	// process environment, which is how a CI runner or a container gets them
+	// in without writing a file first. The file keeps its 0600 requirement;
+	// the environment cannot have one, which is the trade being made.
 	CredentialsPath string `env:"HRM_SQL_MCP_CREDENTIALS" envDefault:"~/.config/hrm-sql-mcp/credentials.env"`
+	// EnvFiles are extra dotenv files, comma separated, lowest precedence
+	// first. Values here are overridden by the process environment.
+	//
+	// Separate from CredentialsPath so a repository can ship a checked-in file
+	// of non-secret settings (database names, hosts) without that file being
+	// held to the 0600 rule that secrets require.
+	EnvFiles string `env:"HRM_SQL_MCP_ENV_FILE"`
 	// ProjectRoot is what the policy's relative paths (sp_dir, java_src_dir)
 	// resolve against. It defaults to the working directory because that is
 	// where an MCP client spawns the server — the same assumption that lets
@@ -40,67 +50,57 @@ func Load() (Config, error) {
 	if err != nil {
 		return c, err
 	}
-	c.CredentialsPath = expandHome(c.CredentialsPath)
+	c.CredentialsPath = envcfg.ExpandHome(c.CredentialsPath)
 	return c, nil
 }
 
-func expandHome(p string) string {
-	if strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return home + p[1:]
+// SourcePaths lists the dotenv files to read, lowest precedence first.
+//
+// The credentials file comes last so that, among files, the one holding
+// secrets wins. The process environment still beats all of them.
+func (c Config) SourcePaths() []string {
+	var out []string
+	for _, p := range strings.Split(c.EnvFiles, ",") {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
 		}
 	}
-	return p
+	return append(out, c.CredentialsPath)
 }
 
-// Store holds credentials keyed by alias and mode.
-type Store struct{ kv map[string]string }
-
-// LoadCredentials reads the credentials file.
+// LoadSource reads the dotenv files named by this config.
 //
-// The file must be mode 0600. This is enforced rather than merely documented:
-// a credentials file that anyone on the machine can read is not a credentials
-// file, and the failure is silent unless something checks. The deploy script
-// takes the same stance with chmod 700 on setenv.sh.
-//
-// Expected keys, upper-cased alias:
-//
-//	HRM_SQL_<ALIAS>_RO_USER / _RO_PASSWORD
-//	HRM_SQL_<ALIAS>_RW_USER / _RW_PASSWORD
-func LoadCredentials(path string) (*Store, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("credentials file %s: %w", path, err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		return nil, fmt.Errorf(
-			"credentials file %s has mode %04o, must be 0600 (run: chmod 600 %s)",
-			path, perm, path)
-	}
+// Missing files are skipped rather than refused. That is what lets one
+// invocation work on a laptop, where credentials live in a 0600 file, and in
+// CI, where they arrive as environment variables and no file exists. A
+// credential that is genuinely absent still fails — at the point of use, with
+// an error naming the credential key it looked for.
+func (c Config) LoadSource() (*envcfg.Set, error) {
+	return envcfg.Load(c.SourcePaths(), true)
+}
 
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open credentials %s: %w", path, err)
-	}
-	defer f.Close()
+// Store resolves credentials from the layered source.
+type Store struct{ src *envcfg.Set }
 
-	kv := make(map[string]string)
-	sc := bufio.NewScanner(f)
-	for ln := 1; sc.Scan(); ln++ {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE", path, ln)
-		}
-		kv[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+// NewStore wraps a resolved source for credential lookups.
+//
+// Expected keys, upper-cased credential key:
+//
+//	HRM_SQL_<KEY>_RO_USER / _RO_PASSWORD
+//	HRM_SQL_<KEY>_RW_USER / _RW_PASSWORD
+//
+// The same names work as process environment variables and as dotenv lines,
+// so moving a deployment from a laptop to CI is a change of where they are
+// set, not of what they are called.
+func NewStore(src *envcfg.Set) *Store { return &Store{src: src} }
+
+// CredentialKeyBase builds the shared prefix for one credential key and mode.
+func CredentialKeyBase(key string, mode target.AccessMode) string {
+	suffix := "RO"
+	if mode == target.ReadWrite {
+		suffix = "RW"
 	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read credentials %s: %w", path, err)
-	}
-	return &Store{kv: kv}, nil
+	return "HRM_SQL_" + strings.ToUpper(strings.TrimSpace(key)) + "_" + suffix
 }
 
 // Lookup returns the user and password for a credential key and access mode.
@@ -109,17 +109,29 @@ func LoadCredentials(path string) (*Store, error) {
 // can share one entry. A missing entry returns ok=false, which callers must
 // treat as "do not connect" — never as "connect without credentials".
 func (s *Store) Lookup(key string, mode target.AccessMode) (string, string, bool) {
-	suffix := "RO"
-	if mode == target.ReadWrite {
-		suffix = "RW"
+	if s == nil || s.src == nil {
+		return "", "", false
 	}
-	base := "HRM_SQL_" + strings.ToUpper(key) + "_" + suffix
-	user, uok := s.kv[base+"_USER"]
-	pass, pok := s.kv[base+"_PASSWORD"]
+	base := CredentialKeyBase(key, mode)
+	user, _, uok := s.src.Lookup(base + "_USER")
+	pass, _, pok := s.src.Lookup(base + "_PASSWORD")
 	if !uok || !pok || user == "" || pass == "" {
 		return "", "", false
 	}
 	return user, pass, true
+}
+
+// Origin reports where a credential was found, for the targets listing. It
+// never returns the value itself.
+func (s *Store) Origin(key string, mode target.AccessMode) (string, bool) {
+	if s == nil || s.src == nil {
+		return "", false
+	}
+	base := CredentialKeyBase(key, mode)
+	if _, o, ok := s.src.Lookup(base + "_PASSWORD"); ok {
+		return o.String(), true
+	}
+	return "", false
 }
 
 // Credentials adapts the store to the target package.

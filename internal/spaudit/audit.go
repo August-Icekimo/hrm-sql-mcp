@@ -32,10 +32,36 @@ const (
 	StatusIdentical Status = "identical"
 )
 
+// The offline statuses, used when the audit ran without a database.
+//
+// They are a separate vocabulary rather than a reuse of the seven above, and
+// that is the whole point. Without the server there is no fact of the matter
+// about deployment, so reporting a script as "file-only" — which asserts the
+// database does not have it — would be inventing the finding. Every offline
+// status is phrased so that it stays true whatever the database turns out to
+// contain.
+const (
+	// StatusMissingScript: Java calls it and Stored Procedure/ has no script.
+	// Offline this cannot be narrowed to ghost or db-only, but it does not
+	// need to be: either way nobody can review the code or rebuild it.
+	StatusMissingScript Status = "missing-script"
+	// StatusUnreferenced: a script no Java source mentions. Weaker than
+	// orphan, which also asserts the script matches what is deployed.
+	StatusUnreferenced Status = "unreferenced"
+	// StatusScripted: a script that Java references. Says nothing about
+	// whether it is deployed or current — only the database can say that.
+	StatusScripted Status = "scripted"
+)
+
 // Order is the order statuses appear in reports: most alarming first.
 var Order = []Status{
 	StatusGhost, StatusDiffers, StatusDBOnly, StatusFileOnly,
 	StatusUnreadable, StatusOrphan, StatusIdentical,
+}
+
+// OfflineOrder is Order's counterpart for a run with no database.
+var OfflineOrder = []Status{
+	StatusMissingScript, StatusUnreferenced, StatusScripted,
 }
 
 // Explain gives the one-line meaning shown in the report's summary table.
@@ -55,6 +81,12 @@ func Explain(s Status) string {
 		return "檔案與資料庫一致，但 Java 找不到呼叫點 —— 待確認是否已死"
 	case StatusIdentical:
 		return "檔案、資料庫、Java 呼叫點三方一致"
+	case StatusMissingScript:
+		return "Java 會呼叫，但沒有原始檔 —— 無法 review、無法重建"
+	case StatusUnreferenced:
+		return "有原始檔，但 Java 找不到任何引用 —— 待確認是否已死"
+	case StatusScripted:
+		return "有原始檔且 Java 有引用 —— 是否已部署、是否一致，離線無法判斷"
 	}
 	return ""
 }
@@ -76,6 +108,15 @@ type Row struct {
 	// on such a row is against an arbitrary one of them and has to say so.
 	OtherFiles []string
 
+	// DBUnknown records that the database was never consulted, which makes
+	// InDB meaningless rather than false. Classify branches on it: treating
+	// "not asked" as "not there" would report every deployed procedure as
+	// missing.
+	//
+	// Phrased as the negative so the zero value is an ordinary three-way row.
+	// A Row built by hand without this field gets the strict classification,
+	// and being wrong that way is loud; the other way round is silent.
+	DBUnknown  bool
 	InDB       bool
 	DBName     string
 	DBModified time.Time
@@ -115,6 +156,11 @@ func (r Row) Referenced() bool { return len(r.CallSites) > 0 }
 
 // Report is the full three-way comparison.
 type Report struct {
+	// Offline marks a report built without a database: two sources, not
+	// three. It changes which statuses can appear, which of them gate, and
+	// the warning the document opens with. A reader who does not know the
+	// server was never asked will read a short findings list as an all-clear.
+	Offline bool
 	// Generated is when the audit ran.
 	Generated time.Time
 	// Target describes the database, so a report can never be mistaken for one
@@ -157,11 +203,16 @@ type Inputs struct {
 	ScriptFailures map[string]error
 	// DiffContext is the number of context lines in generated diffs.
 	DiffContext int
+	// NoDB builds a two-source report because no database was reachable.
+	// Procs is then expected to be empty, and an empty Procs with NoDB unset
+	// would mean something entirely different — a server with no procedures.
+	NoDB bool
 }
 
 // Build performs the three-way comparison.
 func Build(in Inputs) *Report {
 	rep := &Report{
+		Offline:      in.NoDB,
 		Generated:    time.Now(),
 		Counts:       map[Status]int{},
 		FileFailures: map[string]string{},
@@ -186,8 +237,16 @@ func Build(in Inputs) *Report {
 		}
 	}
 
-	dbOf, dbDups := spdb.Index(in.Procs)
-	rep.DuplicateDBNames = dbDups
+	// NoDB wins over whatever Procs holds. A caller that sets both has made a
+	// mistake, and honouring the rows would put procedures in the report that
+	// the run had no business knowing about — the exact fabrication this lane
+	// exists to prevent.
+	var dbOf map[string]spdb.Proc
+	if !in.NoDB {
+		var dbDups []string
+		dbOf, dbDups = spdb.Index(in.Procs)
+		rep.DuplicateDBNames = dbDups
+	}
 
 	javaOf := map[string][]javascan.Site{}
 	if in.Java != nil {
@@ -218,7 +277,7 @@ func Build(in Inputs) *Report {
 	}
 
 	for name := range names {
-		row := buildRow(name, fileOf[name], dbOf, javaOf[name], in.DiffContext)
+		row := buildRow(name, fileOf[name], dbOf, javaOf[name], in.DiffContext, in.NoDB)
 		row.OtherFiles = otherFiles[name]
 		rep.Rows = append(rep.Rows, row)
 	}
@@ -230,8 +289,8 @@ func Build(in Inputs) *Report {
 	return rep
 }
 
-func buildRow(name string, sc *spfile.Script, dbOf map[string]spdb.Proc, sites []javascan.Site, diffContext int) Row {
-	r := Row{Name: name, CallSites: sites}
+func buildRow(name string, sc *spfile.Script, dbOf map[string]spdb.Proc, sites []javascan.Site, diffContext int, dbUnknown bool) Row {
+	r := Row{Name: name, CallSites: sites, DBUnknown: dbUnknown}
 
 	var fileDef string
 	if sc != nil {
@@ -279,6 +338,9 @@ func buildRow(name string, sc *spfile.Script, dbOf map[string]spdb.Proc, sites [
 // the quieter, less alarming answer, because a report that cries wolf and a
 // report that green-lights a deletion are the two ways this becomes harmful.
 func Classify(r Row) Status {
+	if r.DBUnknown {
+		return classifyOffline(r)
+	}
 	switch {
 	case !r.InDB && !r.InFile:
 		// Known only to Java. Build admits these only when there is a call
@@ -302,6 +364,24 @@ func Classify(r Row) Status {
 	}
 }
 
+// classifyOffline assigns a status using only the two sources that exist
+// without a server: the scripts and the Java call sites.
+//
+// The asymmetry of Called vs Referenced is kept from the online path, and for
+// the same reasons — missing-script needs a call site so a coincidental column
+// alias cannot raise it, unreferenced needs the absence of any mention at all
+// so a name built at runtime cannot get a script declared dead.
+func classifyOffline(r Row) Status {
+	switch {
+	case !r.InFile && r.Called():
+		return StatusMissingScript
+	case r.InFile && !r.Referenced():
+		return StatusUnreferenced
+	default:
+		return StatusScripted
+	}
+}
+
 func hasCall(sites []javascan.Site) bool {
 	for _, s := range sites {
 		if s.Kind == javascan.KindCall {
@@ -322,12 +402,32 @@ func (rep *Report) ByStatus(s Status) []Row {
 	return out
 }
 
-// HasFindings reports whether anything needs a human, which is what a CI step
-// would gate on.
+// HasFindings reports whether anything needs a human, which is what the CI
+// step gates on.
+//
+// Untidiness alone never qualifies. file-only, orphan and unreferenced are all
+// housekeeping, and a gate that fires on housekeeping is a gate people learn
+// to pass with --no-verify.
 func (rep *Report) HasFindings() bool {
+	if len(rep.FileFailures) > 0 || len(rep.JavaFailures) > 0 {
+		return true
+	}
+	if rep.Offline {
+		// The only offline status that asserts a defect. The three online
+		// statuses below are not merely absent from an offline report — they
+		// are unknowable in one, so gating on their zero counts would be
+		// gating on a question nobody asked.
+		return rep.Counts[StatusMissingScript] > 0
+	}
 	return rep.Counts[StatusGhost] > 0 ||
 		rep.Counts[StatusDiffers] > 0 ||
-		rep.Counts[StatusDBOnly] > 0 ||
-		len(rep.FileFailures) > 0 ||
-		len(rep.JavaFailures) > 0
+		rep.Counts[StatusDBOnly] > 0
+}
+
+// Statuses returns the display order matching how this report was built.
+func (rep *Report) Statuses() []Status {
+	if rep.Offline {
+		return OfflineOrder
+	}
+	return Order
 }

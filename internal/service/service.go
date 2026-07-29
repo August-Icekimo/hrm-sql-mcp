@@ -27,6 +27,12 @@ type Service struct {
 	log   *audit.Writer
 	appr  *approver.Store
 	snaps *snapshots.Store
+	// creds is kept so the targets listing can report whether a login is
+	// configured, and from where, without ever reading the secret itself.
+	creds *config.Store
+	// overrides records what the environment changed about the policy. Shown
+	// by the targets listing; see policy.Override for why it is kept at all.
+	overrides []policy.Override
 
 	mu     sync.Mutex
 	logins map[string]string
@@ -43,27 +49,16 @@ type Service struct {
 // afterwards would leave a window where a query could run with nowhere to
 // record it, and a window that small is exactly the one nobody tests.
 func New() (*Service, error) {
-	cfg, err := config.Load()
+	cfg, pol, log, overrides, err := newCore()
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Profile == "" {
-		return nil, fmt.Errorf("HRM_SQL_MCP_PROFILE is not set; it has no default so that " +
-			"pointing at an environment is always a deliberate act")
-	}
-	pol, err := policy.Load(cfg.PolicyPath)
-	if err != nil {
-		return nil, err
-	}
-	log, err := audit.Open(pol.Audit.File)
-	if err != nil {
-		return nil, err
-	}
-	store, err := config.LoadCredentials(cfg.CredentialsPath)
+	src, err := cfg.LoadSource()
 	if err != nil {
 		log.Close()
 		return nil, err
 	}
+	store := config.NewStore(src)
 	reg, err := target.NewRegistry(pol, cfg.Profile, store.Credentials())
 	if err != nil {
 		log.Close()
@@ -84,14 +79,90 @@ func New() (*Service, error) {
 	}
 
 	return &Service{
-		cfg: cfg, pol: pol, reg: reg, log: log,
+		cfg: cfg, pol: pol, reg: reg, log: log, creds: store,
 		appr: appr, snaps: snaps, logins: map[string]string{},
+		overrides: overrides,
 	}, nil
+}
+
+// Overrides reports what the environment changed about the policy file.
+func (s *Service) Overrides() []policy.Override { return s.overrides }
+
+// CredentialOrigin says where a target's login was found, without revealing
+// it. Empty when none is configured, which is how the targets listing can
+// distinguish "no credential" from "credential present but the guard refused".
+func (s *Service) CredentialOrigin(alias string, mode target.AccessMode) (string, bool) {
+	pt, ok := s.pol.TargetByAlias(alias)
+	if !ok {
+		return "", false
+	}
+	return s.creds.Origin(pt.CredentialKey, mode)
+}
+
+// NewOffline wires only the parts that need no server: configuration, policy,
+// and the audit log.
+//
+// Credentials are not read and no registry is built, so this succeeds on a
+// machine that has never been given a database login. That is the entire
+// point — the offline audit exists to run in exactly those places, and a
+// constructor that demanded a 0600 credentials file first would make the CI
+// lane unusable on any clean checkout.
+//
+// The returned Service refuses every operation that would connect; see open.
+func NewOffline() (*Service, error) {
+	cfg, pol, log, overrides, err := newCore()
+	if err != nil {
+		return nil, err
+	}
+	return &Service{
+		cfg: cfg, pol: pol, log: log,
+		logins: map[string]string{}, overrides: overrides,
+	}, nil
+}
+
+// newCore loads what both constructors need. The audit log is opened here, so
+// neither path can reach an operation before there is somewhere to record it.
+func newCore() (config.Config, *policy.Policy, *audit.Writer, []policy.Override, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return cfg, nil, nil, nil, err
+	}
+	if cfg.Profile == "" {
+		return cfg, nil, nil, nil, fmt.Errorf("HRM_SQL_MCP_PROFILE is not set; it has no default so that " +
+			"pointing at an environment is always a deliberate act")
+	}
+	// The source is read before the policy because it can rewrite it. Loading
+	// the policy first and patching it afterwards would mean the validator saw
+	// a configuration that no connection uses.
+	src, err := cfg.LoadSource()
+	if err != nil {
+		return cfg, nil, nil, nil, err
+	}
+	pol, overrides, err := policy.LoadWithOverrides(cfg.PolicyPath, src)
+	if err != nil {
+		return cfg, nil, nil, nil, err
+	}
+	// The profile check normally lives in NewRegistry, but the offline path
+	// never builds one. Repeating it here keeps "policy says uat, environment
+	// says local" a refusal on both paths rather than only the connecting one.
+	if pol.Profile != cfg.Profile {
+		return cfg, nil, nil, nil, fmt.Errorf(
+			"profile mismatch: policy declares %q but HRM_SQL_MCP_PROFILE is %q",
+			pol.Profile, cfg.Profile)
+	}
+	log, err := audit.Open(pol.Audit.File)
+	if err != nil {
+		return cfg, nil, nil, nil, err
+	}
+	return cfg, pol, log, overrides, nil
 }
 
 // Close releases connections and the audit log.
 func (s *Service) Close() error {
-	err := s.reg.Close()
+	var err error
+	if s.reg != nil {
+		err = s.reg.Close()
+	}
 	if cerr := s.log.Close(); err == nil {
 		err = cerr
 	}
@@ -101,8 +172,15 @@ func (s *Service) Close() error {
 // Policy returns the loaded policy.
 func (s *Service) Policy() *policy.Policy { return s.pol }
 
-// Aliases lists the declared target aliases.
-func (s *Service) Aliases() []string { return s.reg.Aliases() }
+// Aliases lists the declared target aliases. Read from the policy rather than
+// the registry so it still answers on an offline Service, which has none.
+func (s *Service) Aliases() []string {
+	out := make([]string, 0, len(s.pol.Targets))
+	for _, t := range s.pol.Targets {
+		out = append(out, t.Alias)
+	}
+	return out
+}
 
 // AuditPath returns where records are being written, for startup messages.
 func (s *Service) AuditPath() string { return s.log.Path() }
@@ -137,6 +215,14 @@ func (s *Service) ProjectPath(rel string) string {
 // log: a run of them is either a broken configuration or somebody testing
 // where the fence is, and neither is visible if only successes are kept.
 func (s *Service) open(ctx context.Context, alias, tool string) (*sql.DB, *target.Target, error) {
+	// An offline Service has no registry at all. Refusing here rather than
+	// dereferencing nil means the one thing this Service cannot do fails with
+	// a sentence explaining why, on every operation that tries it.
+	if s.reg == nil {
+		err := fmt.Errorf("this process was started without credentials (offline); %s needs a database", tool)
+		s.deny(tool, alias, err)
+		return nil, nil, err
+	}
 	alias, err := s.ResolveAlias(alias)
 	if err != nil {
 		s.deny(tool, alias, err)

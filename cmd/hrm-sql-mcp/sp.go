@@ -166,17 +166,22 @@ func cmdSPAudit(args []string) error {
 	out := fs.String("out", "", "write to this file instead of stdout")
 	timestamp := fs.Bool("timestamp", false, "include the generation time (off by default so a committed report only changes when the facts do)")
 	diffs := fs.Bool("diffs", true, "embed diffs for differing procedures (markdown only)")
+	offline := fs.Bool("offline", false, "compare files against Java only; do not open a database connection")
+	check := fs.Bool("check", false, "with --out: compare instead of writing, and exit 3 if the file is out of date")
+	gate := fs.Bool("gate", false, "exit 2 when the audit finds something needing a human")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-
-	svc, err := service.New()
-	if err != nil {
-		return err
+	if *check && *out == "" {
+		return fmt.Errorf("--check needs --out: there is no committed file to compare against")
 	}
-	defer svc.Close()
+	if *offline && *alias != "" {
+		// Silently ignoring one of them would let a pre-push hook believe it
+		// audited hrm_0209 when it never opened a socket.
+		return fmt.Errorf("--offline and --target contradict each other; --offline never connects to anything")
+	}
 
-	rep, _, err := svc.SPAudit(context.Background(), *alias)
+	rep, err := runAudit(*offline, *alias)
 	if err != nil {
 		return err
 	}
@@ -188,39 +193,104 @@ func cmdSPAudit(args []string) error {
 		text = auditText(rep)
 	}
 
-	if *out == "" {
+	switch {
+	case *check:
+		if err := checkReport(*out, text, rep); err != nil {
+			return err
+		}
+	case *out == "":
 		fmt.Print(text)
-	} else {
+	default:
 		if err := os.WriteFile(*out, []byte(text), 0o644); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "-- 已寫入 %s（%d 支程序）\n", *out, len(rep.Rows))
 	}
+
 	// Something to act on is called out on stderr rather than left for the
-	// reader to spot in a table. Untidiness alone (orphan, file-only) does not
-	// qualify — a warning that fires on housekeeping gets ignored.
+	// reader to spot in a table. Untidiness alone (orphan, file-only,
+	// unreferenced) does not qualify — a warning that fires on housekeeping
+	// gets ignored, and so does the gate built on it.
 	if rep.HasFindings() {
-		fmt.Fprintln(os.Stderr, "-- 有需要處理的項目（ghost / differs / db-only / 解碼失敗）")
+		what := "ghost / differs / db-only / 解碼失敗"
+		if rep.Offline {
+			what = "missing-script / 解碼失敗"
+		}
+		msg := fmt.Sprintf("-- 有需要處理的項目（%s）", what)
+		if *gate {
+			return failWith(exitFindings, "%s", strings.TrimPrefix(msg, "-- "))
+		}
+		fmt.Fprintln(os.Stderr, msg)
 	}
 	return nil
+}
+
+// runAudit picks the lane. Offline uses a Service built without credentials,
+// so it works on a machine that has never been given a database login.
+func runAudit(offline bool, alias string) (*spaudit.Report, error) {
+	if offline {
+		svc, err := service.NewOffline()
+		if err != nil {
+			return nil, err
+		}
+		defer svc.Close()
+		return svc.SPAuditOffline(context.Background())
+	}
+	svc, err := service.New()
+	if err != nil {
+		return nil, err
+	}
+	defer svc.Close()
+	rep, _, err := svc.SPAudit(context.Background(), alias)
+	return rep, err
+}
+
+// checkReport compares the committed document against what the facts say now.
+//
+// It writes nothing. A --check that repaired the file would report success on
+// the run that changed it, which is the one thing a reviewer needed to see.
+func checkReport(path, want string, rep *spaudit.Report) error {
+	got, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return failWith(exitStale, "%s 不存在；用同一道指令去掉 --check 產生它", path)
+		}
+		return err
+	}
+	if string(got) == want {
+		fmt.Fprintf(os.Stderr, "-- %s 是最新的（%d 支程序）\n", path, len(rep.Rows))
+		return nil
+	}
+	return failWith(exitStale,
+		"%s 與現況不符；用同一道指令去掉 --check 重新產生後一併提交", path)
 }
 
 // auditText is the terminal summary: counts, then the rows that need action.
 func auditText(rep *spaudit.Report) string {
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "TARGET\t%s %s/%s as %s\n",
-		rep.Target["alias"], rep.Target["server"], rep.Target["database"], rep.Target["login"])
+	if rep.Offline {
+		// Stated first and in the same slot the server would occupy, because
+		// the difference between this report and a full one is not a detail.
+		fmt.Fprintf(w, "TARGET\t(離線：未查詢資料庫，只比對原始檔與 Java 呼叫點)\n")
+	} else {
+		fmt.Fprintf(w, "TARGET\t%s %s/%s as %s\n",
+			rep.Target["alias"], rep.Target["server"], rep.Target["database"], rep.Target["login"])
+	}
 	fmt.Fprintf(w, "SP DIR\t%s\n", rep.SPDir)
 	fmt.Fprintf(w, "JAVA\t%s (%d files)\n\n", rep.JavaDir, rep.JavaFiles)
 	fmt.Fprintln(w, "STATUS\tCOUNT\tMEANING")
-	for _, s := range spaudit.Order {
+	for _, s := range rep.Statuses() {
 		fmt.Fprintf(w, "%s\t%d\t%s\n", s, rep.Counts[s], spaudit.Explain(s))
 	}
 	fmt.Fprintf(w, "TOTAL\t%d\t\n", len(rep.Rows))
 	w.Flush()
 
-	for _, s := range []spaudit.Status{spaudit.StatusGhost, spaudit.StatusDiffers, spaudit.StatusDBOnly} {
+	detail := []spaudit.Status{spaudit.StatusGhost, spaudit.StatusDiffers, spaudit.StatusDBOnly}
+	if rep.Offline {
+		detail = []spaudit.Status{spaudit.StatusMissingScript}
+	}
+	for _, s := range detail {
 		rows := rep.ByStatus(s)
 		if len(rows) == 0 {
 			continue
@@ -228,7 +298,7 @@ func auditText(rep *spaudit.Report) string {
 		fmt.Fprintf(&b, "\n%s (%d)\n", strings.ToUpper(string(s)), len(rows))
 		for _, r := range rows {
 			switch s {
-			case spaudit.StatusGhost:
+			case spaudit.StatusGhost, spaudit.StatusMissingScript:
 				fmt.Fprintf(&b, "  %-32s %s\n", r.Name, firstSite(r))
 			case spaudit.StatusDiffers:
 				fmt.Fprintf(&b, "  %-32s %s\n", r.Name, r.FilePath)

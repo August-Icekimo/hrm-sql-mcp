@@ -51,10 +51,11 @@ func Open(t *testing.T) (*sql.DB, *policy.Policy) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	store, err := config.LoadCredentials(cfg.CredentialsPath)
+	src, err := cfg.LoadSource()
 	if err != nil {
-		t.Fatalf("load credentials: %v", err)
+		t.Fatalf("load credential source: %v", err)
 	}
+	store := config.NewStore(src)
 	reg, err := target.NewRegistry(pol, pol.Profile, store.Credentials())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
@@ -93,10 +94,11 @@ func OpenWritable(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	store, err := config.LoadCredentials(cfg.CredentialsPath)
+	src, err := cfg.LoadSource()
 	if err != nil {
-		t.Fatalf("load credentials: %v", err)
+		t.Fatalf("load credential source: %v", err)
 	}
+	store := config.NewStore(src)
 	reg, err := target.NewRegistry(pol, pol.Profile, store.Credentials())
 	if err != nil {
 		t.Fatalf("registry: %v", err)
