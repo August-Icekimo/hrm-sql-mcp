@@ -26,6 +26,9 @@ func cmdQuery(args []string) error {
 		return err
 	}
 
+	if err := checkFlagsFirst(fs.Args()); err != nil {
+		return err
+	}
 	statement, err := readStatement(fs.Args())
 	if err != nil {
 		return err

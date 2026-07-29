@@ -26,6 +26,9 @@ func New(svc *service.Service) *mcp.Server {
 
 	addTargets(srv, svc)
 	addQuery(srv, svc)
+	addExplain(srv, svc)
+	addDeps(srv, svc)
+	addSchemaSearch(srv, svc)
 	addSPList(srv, svc)
 	addSPGet(srv, svc)
 	addSPDiff(srv, svc)

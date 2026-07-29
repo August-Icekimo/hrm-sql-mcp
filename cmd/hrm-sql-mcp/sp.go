@@ -73,6 +73,9 @@ func cmdSPGet(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := checkFlagsFirst(fs.Args()); err != nil {
+		return err
+	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("sp get needs exactly one procedure name")
 	}
@@ -111,6 +114,10 @@ func cmdSPDiff(args []string) error {
 		return err
 	}
 	defer svc.Close()
+
+	if err := checkFlagsFirst(fs.Args()); err != nil {
+		return err
+	}
 
 	res, _, err := svc.SPDiff(context.Background(), *alias, fs.Args(), *lines)
 	if err != nil {

@@ -213,3 +213,80 @@ func TestEmptyStatementIsRejected(t *testing.T) {
 		t.Errorf("err = %v, want ErrEmptyStatement", err)
 	}
 }
+
+// TestExplainDoesNotExecute is the property the whole tool rests on. If
+// SHOWPLAN were ever not in effect, this statement would run — so it is
+// written to be observable: a WAITFOR that would take a minute returns
+// immediately when only planned.
+func TestExplainDoesNotExecute(t *testing.T) {
+	db, _ := testenv.Open(t)
+
+	start := time.Now()
+	plan, err := sqlrun.Explain(context.Background(), db, "WAITFOR DELAY '00:01:00'", sqlrun.Limits{}, false)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("took %v — the statement was executed, not just planned", elapsed)
+	}
+	if plan.XMLBytes == 0 {
+		t.Error("no plan returned")
+	}
+}
+
+// TestExplainLeavesTheConnectionUsable guards the failure that would be
+// hardest to notice: a pooled connection handed back still in SHOWPLAN mode
+// would make the next caller's query return a plan instead of their data.
+func TestExplainLeavesTheConnectionUsable(t *testing.T) {
+	db, _ := testenv.Open(t)
+	ctx := context.Background()
+
+	if _, err := sqlrun.Explain(ctx, db, "SELECT TOP 5 name FROM sys.all_objects", sqlrun.Limits{}, false); err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	// Hammer the pool so the explain connection is very likely reused.
+	for i := range 5 {
+		res, err := sqlrun.Query(ctx, db, "SELECT 42 AS n", nil, sqlrun.Limits{})
+		if err != nil {
+			t.Fatalf("query %d after explain: %v", i, err)
+		}
+		if got := res.Sets[0].Rows[0][0]; got != int64(42) {
+			t.Fatalf("query %d returned %#v, want 42 — the connection was still in SHOWPLAN mode", i, got)
+		}
+	}
+}
+
+func TestExplainRealPlan(t *testing.T) {
+	db, _ := testenv.Open(t)
+	plan, err := sqlrun.Explain(context.Background(), db,
+		"SELECT o.name, c.name FROM sys.objects o JOIN sys.columns c ON c.object_id = o.object_id",
+		sqlrun.Limits{}, true)
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	if len(plan.Statements) == 0 {
+		t.Fatal("no statements in the plan")
+	}
+	if plan.TotalCost() <= 0 {
+		t.Errorf("total cost = %v, want a positive estimate", plan.TotalCost())
+	}
+	// A join has to produce more than one operator; one would mean the nested
+	// RelOps were not being walked.
+	if len(plan.Operators) < 2 {
+		t.Errorf("got %d operators for a join", len(plan.Operators))
+	}
+	if plan.XML == "" {
+		t.Error("include_xml was set but no XML came back")
+	}
+}
+
+func TestExplainRejectsGarbage(t *testing.T) {
+	db, _ := testenv.Open(t)
+	// Compilation still happens, so an invalid statement must fail rather than
+	// return an empty plan that reads as "this is fine".
+	if _, err := sqlrun.Explain(context.Background(), db,
+		"SELECT * FROM this_table_does_not_exist_0000", sqlrun.Limits{}, false); err == nil {
+		t.Error("explaining a statement against a missing table returned no error")
+	}
+}

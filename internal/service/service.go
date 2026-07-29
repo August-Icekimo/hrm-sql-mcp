@@ -25,6 +25,11 @@ type Service struct {
 
 	mu     sync.Mutex
 	logins map[string]string
+
+	// dict caches the parsed data dictionary. It is 10,821 lines and does not
+	// change while the process runs, so parsing it per search would be pure
+	// waste in the long-lived MCP case.
+	dict dictCache
 }
 
 // New wires configuration, policy, credentials and the audit log together.

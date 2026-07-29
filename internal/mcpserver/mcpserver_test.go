@@ -76,8 +76,12 @@ func TestToolsAreRegisteredAndReadOnly(t *testing.T) {
 		t.Fatalf("ListTools: %v", err)
 	}
 
+	// An allowlist, not a count. A tool appearing here that nobody added on
+	// purpose is the thing to catch — this is the test that fails the day a
+	// write tool is registered into the read-only set by accident.
 	want := map[string]bool{
-		"mssql_targets": false, "mssql_query": false, "mssql_sp_list": false,
+		"mssql_targets": false, "mssql_query": false, "mssql_explain": false,
+		"mssql_deps": false, "mssql_schema_search": false, "mssql_sp_list": false,
 		"mssql_sp_get": false, "mssql_sp_diff": false, "mssql_sp_audit": false,
 	}
 	for _, tool := range res.Tools {
@@ -310,4 +314,176 @@ func decodeStructured(t *testing.T, res *mcp.CallToolResult, into any) {
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+func TestExplainTool(t *testing.T) {
+	cs := connect(t)
+	res := call(t, cs, "mssql_explain", map[string]any{
+		"target": testenv.Alias,
+		"sql":    "SELECT o.name FROM sys.objects o JOIN sys.columns c ON c.object_id = o.object_id",
+	})
+	if res.IsError {
+		t.Fatalf("mssql_explain failed: %s", resultText(t, res))
+	}
+
+	got := resultText(t, res)
+	// The model must not read a plan as a result set. Saying it outright is
+	// cheaper than hoping the tool description was read.
+	if !strings.Contains(got, "nothing was executed") {
+		t.Errorf("response does not say the statement was not executed:\n%s", got)
+	}
+
+	var out struct {
+		TotalCost  float64 `json:"total_cost"`
+		XMLBytes   int     `json:"xml_bytes"`
+		Statements []struct {
+			EstimatedRows float64 `json:"estimated_rows"`
+		} `json:"statements"`
+		XML string `json:"xml"`
+	}
+	decodeStructured(t, res, &out)
+	if out.TotalCost <= 0 || len(out.Statements) == 0 {
+		t.Errorf("plan summary looks empty: %+v", out)
+	}
+	// The raw XML is thousands of bytes and was not asked for.
+	if out.XML != "" {
+		t.Errorf("plan XML was returned without include_xml")
+	}
+	if out.XMLBytes == 0 {
+		t.Error("xml_bytes should report the plan size even when the XML is omitted")
+	}
+}
+
+func TestExplainToolReportsCompileErrors(t *testing.T) {
+	cs := connect(t)
+	res := call(t, cs, "mssql_explain", map[string]any{
+		"target": testenv.Alias,
+		"sql":    "SELECT * FROM no_such_table_0000",
+	})
+	if !res.IsError {
+		t.Fatalf("explaining a bad statement was not reported as an error:\n%s", resultText(t, res))
+	}
+}
+
+func TestDepsTool(t *testing.T) {
+	cs := connect(t)
+
+	// Find a table something references, so the assertion is about the tool
+	// rather than about which fixture happens to be restored.
+	find := call(t, cs, "mssql_query", map[string]any{
+		"target": testenv.Alias,
+		"sql": `SELECT TOP 1 s.name + '.' + t.name AS n FROM sys.tables t
+		        JOIN sys.schemas s ON s.schema_id = t.schema_id
+		        JOIN sys.sql_expression_dependencies d ON d.referenced_id = t.object_id
+		        GROUP BY s.name, t.name ORDER BY COUNT(*) DESC`,
+	})
+	if find.IsError {
+		t.Fatalf("could not find a referenced table: %s", resultText(t, find))
+	}
+	table := lastLine(resultText(t, find))
+	if table == "" || !strings.Contains(table, ".") {
+		t.Skip("no referenced table in this database")
+	}
+
+	res := call(t, cs, "mssql_deps", map[string]any{
+		"target": testenv.Alias, "name": table, "direction": "used_by",
+	})
+	if res.IsError {
+		t.Fatalf("mssql_deps failed: %s", resultText(t, res))
+	}
+
+	var out struct {
+		Dependencies []struct {
+			Name      string `json:"name"`
+			Direction string `json:"direction"`
+			Exists    bool   `json:"exists"`
+		} `json:"dependencies"`
+		Caveat string `json:"caveat"`
+	}
+	decodeStructured(t, res, &out)
+	if len(out.Dependencies) == 0 {
+		t.Fatalf("%s is referenced but deps returned nothing", table)
+	}
+	for _, d := range out.Dependencies {
+		if d.Direction != "used_by" {
+			t.Errorf("direction filter ignored: %+v", d)
+		}
+	}
+	// The caveat travels in the payload, not only the tool description: an
+	// empty dependency list is the answer most likely to be over-read.
+	if !strings.Contains(out.Caveat, "EXEC(@sql)") {
+		t.Errorf("caveat does not mention dynamic SQL: %q", out.Caveat)
+	}
+	if !strings.Contains(resultText(t, res), "sp audit") && !strings.Contains(resultText(t, res), "mssql_sp_audit") {
+		t.Error("response does not point at the audit tool for application call sites")
+	}
+}
+
+func TestSchemaSearchTool(t *testing.T) {
+	testenv.RequireProjectRoot(t)
+	cs := connect(t)
+
+	res := call(t, cs, "mssql_schema_search", map[string]any{"query": "emp_no", "limit": 5})
+	if res.IsError {
+		t.Fatalf("mssql_schema_search failed: %s", resultText(t, res))
+	}
+
+	var out struct {
+		Source  string `json:"source"`
+		Note    string `json:"note"`
+		Matches []struct {
+			Table   string `json:"table"`
+			Matched string `json:"matched"`
+			Column  *struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"column"`
+		} `json:"matches"`
+	}
+	decodeStructured(t, res, &out)
+	if len(out.Matches) == 0 {
+		t.Fatal("emp_no matched nothing in the dictionary")
+	}
+	if out.Source == "" {
+		t.Error("the dictionary path is not reported, so a caller cannot tell where the answer came from")
+	}
+	// The answer is from a file, not the server. A caller that mistakes it for
+	// live schema will trust a column that may no longer exist.
+	if !strings.Contains(out.Note, "not the live database") {
+		t.Errorf("note does not say the source is a document: %q", out.Note)
+	}
+	if out.Matches[0].Column == nil || out.Matches[0].Column.Name != "emp_no" {
+		t.Errorf("top match is not the exact column: %+v", out.Matches[0])
+	}
+}
+
+// TestSchemaSearchByChineseDescription is the reason the dictionary is worth
+// having: the catalog cannot answer this at all.
+func TestSchemaSearchByChineseDescription(t *testing.T) {
+	testenv.RequireProjectRoot(t)
+	cs := connect(t)
+
+	res := call(t, cs, "mssql_schema_search", map[string]any{"query": "事假", "limit": 10})
+	if res.IsError {
+		t.Fatalf("mssql_schema_search failed: %s", resultText(t, res))
+	}
+	var out struct {
+		Matches []struct {
+			Matched string `json:"matched"`
+			Column  *struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"column"`
+		} `json:"matches"`
+	}
+	decodeStructured(t, res, &out)
+	if len(out.Matches) == 0 {
+		t.Fatal("事假 matched nothing; the Chinese descriptions are not being searched")
+	}
+	for _, m := range out.Matches {
+		if m.Column != nil && m.Matched == "description" &&
+			!strings.Contains(m.Column.Description, "事假") {
+			t.Errorf("match claims a description hit that is not there: %+v", m.Column)
+		}
+	}
 }

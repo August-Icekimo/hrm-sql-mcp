@@ -10,6 +10,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 func main() {
@@ -30,6 +31,12 @@ func run(args []string) error {
 		return cmdTargets(args[1:])
 	case "query":
 		return cmdQuery(args[1:])
+	case "explain":
+		return cmdExplain(args[1:])
+	case "deps":
+		return cmdDeps(args[1:])
+	case "schema":
+		return cmdSchema(args[1:])
 	case "sp":
 		return cmdSP(args[1:])
 	case "help", "-h", "--help":
@@ -39,12 +46,31 @@ func run(args []string) error {
 	}
 }
 
+// checkFlagsFirst rejects a flag that appears after a positional argument.
+//
+// Go's flag package stops parsing at the first non-flag word, so
+// `schema 特休 --limit 6` silently searches for the literal string
+// "特休 --limit 6" and reports no matches. The user gets a wrong answer that
+// looks like a real one. Refusing outright costs a retype; not refusing costs
+// somebody concluding a column does not exist.
+func checkFlagsFirst(args []string) error {
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") && a != "-" {
+			return fmt.Errorf("flags must come before positional arguments; move %q ahead of them", a)
+		}
+	}
+	return nil
+}
+
 func usage() error {
 	fmt.Println(`hrm-sql-mcp — guarded SQL Server access for AI agents
 
   serve                Run as an MCP server over stdio (how editors invoke it)
   targets              Show declared targets and whether each passes the guard
   query <sql|->        Run a statement and print bounded results ("-" reads stdin)
+  explain <sql|->      Estimated plan for a statement, without running it
+  deps <name>          What an object references, and what references it
+  schema <term>        Search the data dictionary by name or Chinese description
   sp list              List the procedures the database actually has
   sp get <name>        Print one procedure's definition from the database
   sp diff [name...]    Compare scripts against the database
