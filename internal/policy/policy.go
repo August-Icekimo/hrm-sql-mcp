@@ -63,25 +63,32 @@ type Target struct {
 
 // Limits bound query cost and blast radius.
 type Limits struct {
-	MaxRows         int           `yaml:"max_rows"`
-	MaxBytes        int           `yaml:"max_bytes"`
-	QueryTimeout    time.Duration `yaml:"query_timeout"`
-	ExecuteTimeout  time.Duration `yaml:"execute_timeout"`
-	LockTimeout     time.Duration `yaml:"lock_timeout"`
+	MaxRows        int           `yaml:"max_rows"`
+	MaxBytes       int           `yaml:"max_bytes"`
+	QueryTimeout   time.Duration `yaml:"query_timeout"`
+	ExecuteTimeout time.Duration `yaml:"execute_timeout"`
+	LockTimeout    time.Duration `yaml:"lock_timeout"`
 }
 
 // Paths point at files in the consuming project, relative to its root.
 type Paths struct {
-	SPDir       string `yaml:"sp_dir"`
-	SchemaDict  string `yaml:"schema_dict"`
-	JavaSrcDir  string `yaml:"java_src_dir"`
+	SPDir      string `yaml:"sp_dir"`
+	SchemaDict string `yaml:"schema_dict"`
+	JavaSrcDir string `yaml:"java_src_dir"`
 }
 
 // Audit configures the append-only log.
 type Audit struct {
+	// File is the JSONL log. It has a default and cannot be set to empty:
+	// there is no configuration that turns auditing off, because a policy
+	// that could silently disable the record of what an agent did to this
+	// database would defeat every other control in this file.
 	File        string `yaml:"file"`
 	SnapshotDir string `yaml:"snapshot_dir"`
 }
+
+// DefaultAuditFile is used when the policy does not name one.
+const DefaultAuditFile = "~/.local/state/hrm-sql-mcp/audit.jsonl"
 
 // Load reads and validates a policy file.
 func Load(path string) (*Policy, error) {
@@ -115,6 +122,9 @@ func (p *Policy) applyDefaults() {
 	}
 	if p.Limits.LockTimeout == 0 {
 		p.Limits.LockTimeout = 5 * time.Second
+	}
+	if strings.TrimSpace(p.Audit.File) == "" {
+		p.Audit.File = DefaultAuditFile
 	}
 	for i := range p.Targets {
 		if p.Targets[i].Port == 0 {
