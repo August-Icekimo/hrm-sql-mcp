@@ -5,7 +5,8 @@ import (
 	"strings"
 )
 
-var leadingCreateOrAlter = regexp.MustCompile(`(?i)^([ \t]*)(CREATE|ALTER)([ \t]+PROC)`)
+var leadingCreateOrAlter = regexp.MustCompile(
+	`(?i)^([ \t]*)(CREATE[ \t]+OR[ \t]+ALTER|CREATE|ALTER)([ \t]+PROC)`)
 
 // Normalize prepares a definition for comparison.
 //
@@ -15,10 +16,13 @@ var leadingCreateOrAlter = regexp.MustCompile(`(?i)^([ \t]*)(CREATE|ALTER)([ \t]
 //     server returns differ here for reasons nobody cares about.
 //  2. Trailing whitespace on each line is removed. Editors add it silently.
 //  3. Trailing blank lines are removed.
-//  4. A leading CREATE is rewritten to ALTER. sys.sql_modules stores the text
-//     of the most recent CREATE *or* ALTER, so a procedure that has ever been
-//     altered reads as ALTER on the server while the file on disk still says
-//     CREATE. Treating them as different would flag almost every procedure.
+//  4. A leading CREATE — or CREATE OR ALTER — is rewritten to ALTER.
+//     sys.sql_modules stores the text of the most recent CREATE *or* ALTER, so
+//     a procedure that has ever been altered reads as ALTER on the server
+//     while the file on disk still says CREATE. Treating them as different
+//     would flag almost every procedure. CREATE OR ALTER is stored verbatim by
+//     the server, so folding all three spellings to one keeps a file and a
+//     server that were deployed via different statements comparable.
 //
 // Deliberately NOT done: case folding, re-indenting, collapsing runs of
 // spaces, sorting anything. Those are real differences between the file and

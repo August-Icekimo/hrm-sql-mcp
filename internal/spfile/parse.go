@@ -7,10 +7,22 @@ import (
 	"strings"
 )
 
-// procHeader matches CREATE/ALTER PROCEDURE and captures the bare name.
-// Run against literal-stripped text so a mention inside a comment is ignored.
+// procHeader matches CREATE/ALTER/CREATE OR ALTER PROCEDURE and captures the
+// bare name. Run against literal-stripped text so a mention inside a comment
+// is ignored.
+//
+// CREATE OR ALTER (SQL Server 2016 SP1+) has to be listed first: Go's regexp
+// alternation is leftmost-first, so a bare `CREATE` alternative placed ahead
+// of it would match and then fail on the `OR` where PROC was expected.
+//
+// Missing this form was not a cosmetic gap. A file whose only definition said
+// CREATE OR ALTER parsed as defining *no* procedures at all, so it vanished
+// from the file side of the inventory and its Java call sites were reported as
+// `missing-script` — the tool announcing that source it was holding did not
+// exist. That is exactly the silent-omission failure ScanDir's comment says
+// this tool must not create.
 var procHeader = regexp.MustCompile(
-	`(?im)^[ \t]*(CREATE|ALTER)[ \t]+PROC(?:EDURE)?[ \t]+` +
+	`(?im)^[ \t]*(CREATE[ \t]+OR[ \t]+ALTER|CREATE|ALTER)[ \t]+PROC(?:EDURE)?[ \t]+` +
 		`(?:\[?[A-Za-z0-9_]+\]?[ \t]*\.[ \t]*)?` + // optional schema, e.g. dbo.
 		`\[?([A-Za-z0-9_#@$]+)\]?`)
 

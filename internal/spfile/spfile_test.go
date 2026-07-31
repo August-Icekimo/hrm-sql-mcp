@@ -141,6 +141,39 @@ ALTER PROC sp_second AS SELECT 2
 	}
 }
 
+// TestParseTextFindsCreateOrAlter pins a regression that reached the shared
+// inventory: sp_SRF1000.sql was rescripted as CREATE OR ALTER, the parser
+// matched nothing, and the offline audit reported the procedure as
+// `missing-script` while its source file sat right there in the repo.
+//
+// A parse miss here is not a missed row. It inverts the report's meaning for
+// the affected procedure, and a gate that cries wolf is one people learn to
+// pass with --no-verify.
+func TestParseTextFindsCreateOrAlter(t *testing.T) {
+	cases := []struct {
+		name, script, want string
+	}{
+		{"create or alter", "CREATE OR ALTER PROCEDURE [dbo].[sp_SRF1000]\nAS\nSELECT 1\n", "sp_srf1000"},
+		{"lower case", "create or alter procedure dbo.sp_x\nAS\nSELECT 1\n", "sp_x"},
+		{"extra spacing", "CREATE   OR\tALTER  PROC sp_y AS SELECT 1\n", "sp_y"},
+		{"plain create still works", "CREATE PROCEDURE sp_z AS SELECT 1\n", "sp_z"},
+		{"plain alter still works", "ALTER PROC sp_w AS SELECT 1\n", "sp_w"},
+	}
+	for _, c := range cases {
+		s := ParseText(c.script)
+		if len(s.Procs) != 1 || s.Procs[0] != c.want {
+			t.Errorf("%s: procs = %v, want [%s]", c.name, s.Procs, c.want)
+		}
+	}
+
+	// The bare-CREATE alternative must not shadow CREATE OR ALTER. If it did,
+	// the match would stop after CREATE and fail on OR, silently dropping the
+	// procedure — the exact bug above, reintroduced.
+	if s := ParseText("CREATE OR ALTER PROC sp_shadow AS SELECT 1\n"); len(s.Procs) != 1 {
+		t.Errorf("alternation order regressed: procs = %v", s.Procs)
+	}
+}
+
 // TestNormalizeIsRestrained is the important one. A normaliser that is too
 // aggressive reports "identical" for procedures that genuinely differ, which
 // is worse than having no tool.
@@ -154,6 +187,9 @@ func TestNormalizeIsRestrained(t *testing.T) {
 		{"trailing spaces", "CREATE PROC sp_x   \nAS\t\n    SELECT 1  \n"},
 		{"trailing blank lines", base + "\n\n\n"},
 		{"CREATE vs ALTER", "ALTER PROC sp_x\nAS\n    SELECT 1\n"},
+		// The server stores CREATE OR ALTER verbatim, so a file deployed that
+		// way must still compare equal to one deployed with a plain ALTER.
+		{"CREATE OR ALTER vs ALTER", "CREATE OR ALTER PROC sp_x\nAS\n    SELECT 1\n"},
 	}
 	for _, c := range shouldMatch {
 		if !Equal(base, c.other) {
