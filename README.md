@@ -61,7 +61,14 @@ EOF
 那樣給的。詳見〈連線組態〉。
 
 **絕不重用應用程式的資料庫帳號。** 那會讓 DBA 端的歸因變成不可能，而且會繼承
-應用程式的全部權限。
+應用程式的全部權限。這兩個帳號要專門建，建立腳本在 HRM 專案的
+`mcp/sql/create_hrm_mcp_ro.sql`——它跟政策檔一樣住在 HRM 而不是這裡，因為
+「哪些帳號可以碰 HRM 的資料庫」是 HRM 的事實，要跟著那個專案的 code review 走。
+
+RO 的權限形狀是 `db_datareader` ＋ `VIEW DEFINITION` ＋ `SHOWPLAN`，再加上
+`DENY EXECUTE`。**`VIEW DEFINITION` 漏掉不會報錯**——`sys.sql_modules.definition`
+會安靜地回 NULL，症狀是 `sp audit` 指控一整批程序「資料庫上不存在」。
+`SHOWPLAN` 漏掉倒是會明講，只有 `explain` 受影響。
 
 ---
 
