@@ -6,6 +6,17 @@
 # 三個目標是同一台伺服器上不同時間點的測試快照，彼此只差在時間點與測試對象，
 # 都不是正式環境的完整還原。宣告成多個目標是為了能互相比對——一個發現究竟是
 # 缺陷，還是「那份快照的時間比較早」，只有並排看才分得出來。
+#
+# ⚠ 這份清單會過期。快照是人手建立與 drop 的，這個檔案不會自己跟上。
+#   2026-08-07 盤點時發現原本宣告的 hrm_0424 與 hrm_0511 已經 drop 好幾個月，
+#   而測試套件照樣全綠——用到 hrm_0424 的那個測試只驗「政策標 read-only 的目標
+#   會被拒絕寫入」，而那個拒絕發生在連線之前，所以目標存不存在根本不影響結果。
+#   現在 internal/testenv 會在每個進入點檢查這裡宣告的別名，別名對不上就直接
+#   Fatal 並列出實際宣告了哪些，不再讓夾具壞掉卻沒人知道。
+#
+#   不想改這個檔案也可以直接用環境變數換掉：
+#       HRM_SQL_MCP_TEST_POLICY / _ALIAS / _ALIAS_OTHER
+#   詳見 internal/testenv 的套件註解。
 server:
   name: hrm-sql-mcp
   version: 0.1.0
@@ -28,25 +39,33 @@ targets:
     # 本機 loopback 可接受；連 UAT 時要重新評估。
     trust_server_certificate: true
     app_name: hrm-sql-mcp
+    # 唯一標 writable 的一份，而且是有理由的：讀寫登入 hrm_mcp_rw 的 USER 只建
+    # 在資料庫 hrm 裡。其他兩份只有 hrm_mcp_ro，對它們寫入會在登入階段以
+    # Msg 4060 失敗——那證明不了「政策擋下寫入」，只證明帳號進不去。
     writable: true
 
-  - alias: hrm_0424
+  - alias: hrm_0805
     host: 127.0.0.1
     port: 1433
-    database: hrm_0424
-    note: "2026-04-27 還原的測試快照"
+    database: hrm_0805
+    note: "2026-08-06 以腳本建立（162 程序 / 211 表 / 47 view）；目前的主力快照"
     credential_key: local_hrm
     allow_cidrs: ["127.0.0.0/8"]
     encrypt: true
     trust_server_certificate: true
     app_name: hrm-sql-mcp
+    # testenv.AliasOther 預設指這一份，靠的就是這個 false：
+    # TestDeployRefusesUnwritableTarget 要的是一個「政策拒絕寫入」的目標。
     writable: false
 
-  - alias: hrm_0511
+  - alias: hrm_0709
     host: 127.0.0.1
     port: 1433
-    database: hrm_0511
-    note: "2026-05-22 還原的測試快照（程序數明顯較少，形狀與另外兩份不同）"
+    database: hrm_0709
+    # 留著當對照組而不是 drop：它有幾支主力快照沒有的程序，少了它，那些程序
+    # 在盤點報告裡會變成 ghost，而那是快照缺漏不是缺陷。哪幾支見被服務專案的
+    # 政策檔，這裡不列——這個 repo 是公開的。
+    note: "2026-08-05 以腳本建立（140 程序）；對照組"
     credential_key: local_hrm
     allow_cidrs: ["127.0.0.0/8"]
     encrypt: true
