@@ -115,7 +115,11 @@ func Query(ctx context.Context, db *sql.DB, statement string, args []any, lim Li
 	}
 	defer rows.Close()
 
-	res := &Result{}
+	// Sets is allocated for the same reason as Set.Rows below. The loop always
+	// appends at least once today, so this is not reachable — but that is a
+	// property of the loop, not of the type, and the next person to touch the
+	// loop should not have to rediscover why it matters.
+	res := &Result{Sets: make([]Set, 0, 1)}
 	for {
 		set, stop, err := readSet(rows, lim, &res.Bytes)
 		if err != nil {
@@ -153,6 +157,27 @@ func readSet(rows *sql.Rows, lim Limits, total *int) (set Set, stop bool, err er
 	for i, ct := range colTypes {
 		set.Columns[i] = Column{Name: ct.Name(), Type: ct.DatabaseTypeName()}
 	}
+
+	// Rows must be an allocated slice before the scan loop, not left to the
+	// first append.
+	//
+	// A nil slice marshals to JSON null, not []. The MCP tool output is
+	// validated against a schema generated from these structs, where rows is
+	// an array — so a query that legitimately matched nothing was rejected as
+	// a malformed response:
+	//
+	//     validating /properties/sets/items/properties/rows:
+	//     type: <invalid reflect.Value> has type "null", want "array"
+	//
+	// That message describes a broken tool. The tool was fine; the query
+	// simply had no rows. An agent reading it has no way to reach the correct
+	// conclusion, and "no rows" is an ordinary, frequent answer — the failure
+	// mode is common and points somewhere completely wrong.
+	//
+	// Fixed here rather than at the MCP layer because sqlrun.Set is the single
+	// representation both the CLI (--format json) and the MCP server serialize;
+	// normalizing downstream would leave the CLI still emitting null.
+	set.Rows = make([][]any, 0)
 
 	vals := make([]any, len(colTypes))
 	ptrs := make([]any, len(colTypes))

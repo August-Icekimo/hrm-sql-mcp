@@ -1,6 +1,8 @@
 package tsql
 
 import (
+	"bytes"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -143,4 +145,38 @@ func TestNoAuthorisationAPI(t *testing.T) {
 	var l Label
 	_ = l.Writes()
 	_ = l.Summary()
+}
+
+// TestEmptyStatementKindsMarshalAsArray: an empty batch has zero kinds, and
+// zero kinds must serialize as [] rather than null.
+//
+// Classify already guards the normal path (no pattern matched -> KindOther),
+// but the early return for an empty statement bypassed it and handed back a
+// nil slice, which reached the audit JSONL as "kinds":null. Whatever reads
+// that trail later has to range over a list; null is a parse error deferred to
+// the least convenient moment.
+//
+// The kind count is asserted too, because the tempting one-line "fix" is to
+// return KindOther here. That would serialize fine and be wrong: Summary()
+// reads zero kinds as KindEmpty, so KindOther would relabel an empty batch as
+// an unrecognised one.
+func TestEmptyStatementKindsMarshalAsArray(t *testing.T) {
+	for _, stmt := range []string{"", "   ", "\n\t ", "-- just a comment"} {
+		l := Classify(stmt)
+
+		if len(l.Kinds) != 0 {
+			t.Errorf("Classify(%q).Kinds = %v, want none", stmt, l.Kinds)
+		}
+		if got := l.Summary(); got != string(KindEmpty) {
+			t.Errorf("Classify(%q).Summary() = %q, want %q", stmt, got, KindEmpty)
+		}
+
+		b, err := json.Marshal(l)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		if bytes.Contains(b, []byte(`"kinds":null`)) {
+			t.Errorf(`Classify(%q) marshalled to "kinds":null, want "kinds":[] — got %s`, stmt, b)
+		}
+	}
 }

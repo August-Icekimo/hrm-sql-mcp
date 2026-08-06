@@ -102,7 +102,15 @@ var (
 func Classify(statement string) Label {
 	stripped := strip(statement)
 	if strings.TrimSpace(stripped) == "" {
-		return Label{}
+		// Zero kinds, not "some unknown kind" — Summary() reads this exact
+		// state as KindEmpty, so KindOther here would silently relabel an
+		// empty batch as an unrecognised one.
+		//
+		// Allocated rather than left nil so the audit JSONL records "kinds":[]
+		// instead of "kinds":null. Same reason Failures is initialised in
+		// SPDiffResult: a null where the reader expects a list is a parse
+		// error waiting to happen in whatever reads the audit trail later.
+		return Label{Kinds: make([]Kind, 0)}
 	}
 
 	var l Label

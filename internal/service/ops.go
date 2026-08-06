@@ -226,7 +226,13 @@ func (s *Service) SPDiff(ctx context.Context, alias string, names []string, diff
 		want[normaliseName(n)] = true
 	}
 
-	out := &SPDiffResult{Failures: map[string]string{}}
+	// Both fields are allocated up front: a nil map and a nil slice each
+	// marshal to JSON null, and "results": null in `sp diff --format json`
+	// breaks a reader that reasonably expects to range over a list.
+	out := &SPDiffResult{
+		Results:  make([]DiffResult, 0),
+		Failures: map[string]string{},
+	}
 	for f, e := range failures {
 		out.Failures[f] = e.Error()
 	}

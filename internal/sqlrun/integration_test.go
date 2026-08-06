@@ -1,7 +1,9 @@
 package sqlrun_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -404,5 +406,51 @@ func TestExecReadOnlyLoginStillCannotWrite(t *testing.T) {
 	n, ok := sqlrun.ServerErrorNumber(err)
 	if !ok || n != 229 {
 		t.Errorf("err = %v (sql error %d, ok=%v), want server error 229", err, n, ok)
+	}
+}
+
+// TestEmptyResultSetMarshalsAsArray: a query that legitimately matches nothing
+// must serialize rows as [], never null.
+//
+// This is a regression test for a bug whose whole cost was in its error
+// message. Rows was filled only by append, so a zero-row result left it nil,
+// and a nil slice marshals to null. The MCP tool output is validated against a
+// schema generated from these structs, where rows is an array, so the response
+// was rejected with:
+//
+//	validating /properties/sets/items/properties/rows:
+//	type: <invalid reflect.Value> has type "null", want "array"
+//
+// Nothing was wrong with the tool or the query. But that message says the tool
+// is broken, and "no rows" is one of the most common answers a query can give
+// — so the wrong diagnosis was also the frequent one.
+//
+// Asserting on the marshalled JSON rather than on Rows != nil is deliberate:
+// null vs [] is the thing that broke, and a future refactor could reintroduce
+// it (a custom MarshalJSON, a rebuilt struct) while leaving Rows non-nil here.
+func TestEmptyResultSetMarshalsAsArray(t *testing.T) {
+	db, _ := testenv.Open(t)
+
+	res, err := sqlrun.Query(context.Background(), db,
+		"SELECT name FROM sys.tables WHERE name = '<<no such table>>'", nil, sqlrun.Limits{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res.Sets) != 1 {
+		t.Fatalf("got %d result sets, want 1", len(res.Sets))
+	}
+	if n := len(res.Sets[0].Rows); n != 0 {
+		t.Fatalf("got %d rows, want 0 — the query is not testing what it should", n)
+	}
+
+	b, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte(`"rows":null`)) {
+		t.Errorf(`marshalled to "rows":null, want "rows":[] — got %s`, b)
+	}
+	if !bytes.Contains(b, []byte(`"rows":[]`)) {
+		t.Errorf(`missing "rows":[] — got %s`, b)
 	}
 }
