@@ -328,6 +328,7 @@ func (s *Service) SPAudit(ctx context.Context, alias string) (*spaudit.Report, *
 		ScriptFailures: failures,
 		DiffContext:    3,
 	})
+	rep.Notes = src.notes
 	rep.Target = t.Describe(login)
 	if snap, serr := spdb.SnapshotOf(cctx, db); serr == nil {
 		rep.Snapshot = snap.String()
@@ -365,6 +366,7 @@ func (s *Service) SPAuditOffline(ctx context.Context) (*spaudit.Report, error) {
 		DiffContext:    3,
 		NoDB:           true,
 	})
+	rep.Notes = src.notes
 	rep.SPDir = s.pol.Paths.SPDir
 	rep.JavaDir = s.pol.Paths.JavaSrcDir
 
@@ -379,6 +381,20 @@ type localSources struct {
 	scripts  []*spfile.Script
 	java     *javascan.Result
 	failures map[string]error
+	notes    spaudit.Notes
+}
+
+// loadNotes reads the optional human-findings file.
+//
+// Loaded here rather than in each caller so the offline lane carries the same
+// notes as the full one. An offline report that dropped them would be the
+// worse half of the pair on exactly the machines that cannot check anything
+// against a database — the ones that most need somebody's earlier conclusion.
+func (s *Service) loadNotes() (spaudit.Notes, error) {
+	if strings.TrimSpace(s.pol.Paths.SPNotes) == "" {
+		return nil, nil
+	}
+	return spaudit.LoadNotes(s.ProjectPath(s.pol.Paths.SPNotes))
 }
 
 // scanLocalSources reads the scripts and the Java tree. Shared so the offline
@@ -404,7 +420,12 @@ func (s *Service) scanLocalSources() (localSources, error) {
 	if err != nil {
 		return out, fmt.Errorf("scan %s: %w", javaDir, err)
 	}
-	out.scripts, out.java, out.failures = scripts, java, failures
+	notes, err := s.loadNotes()
+	if err != nil {
+		return out, err
+	}
+
+	out.scripts, out.java, out.failures, out.notes = scripts, java, failures, notes
 	return out, nil
 }
 

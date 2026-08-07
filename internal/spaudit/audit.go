@@ -187,6 +187,11 @@ type Report struct {
 	// claim about that name ambiguous.
 	DuplicateFiles   []string
 	DuplicateDBNames []string
+
+	// Notes are human findings keyed by procedure name. They are rendered as
+	// their own section and never alter a status or a count — see notes.go for
+	// why that limit is deliberate.
+	Notes Notes
 }
 
 // Inputs are the three sources, already collected.
