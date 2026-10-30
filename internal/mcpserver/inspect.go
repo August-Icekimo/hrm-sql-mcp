@@ -100,7 +100,7 @@ func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 type depsIn struct {
 	Target    string `json:"target,omitempty" jsonschema:"Target alias from mssql_targets."`
-	Name      string `json:"name" jsonschema:"Object name, bare or schema-qualified (sp_x or dbo.sp_x)."`
+	Name      string `json:"name" jsonschema:"Object name, bare or schema-qualified (sp_x, dbo.sp_x). Bracket a name that contains dots: [EIP.a.b_1] or [dbo].[EIP.a.b_1]."`
 	Direction string `json:"direction,omitempty" jsonschema:"uses (what this object references), used_by (what references it), or both. Default both."`
 }
 

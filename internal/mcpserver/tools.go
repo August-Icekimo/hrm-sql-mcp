@@ -233,7 +233,7 @@ func addSPList(srv *mcp.Server, svc *service.Service) {
 
 type spGetIn struct {
 	Target string `json:"target,omitempty" jsonschema:"Target alias from mssql_targets."`
-	Name   string `json:"name" jsonschema:"Procedure name, bare or schema-qualified (sp_x or dbo.sp_x)."`
+	Name   string `json:"name" jsonschema:"Procedure name, bare or schema-qualified (sp_x, dbo.sp_x). Bracket a name that contains dots: [EIP.a.b_1] or [dbo].[EIP.a.b_1]."`
 }
 
 type spGetOut struct {
