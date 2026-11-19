@@ -6,7 +6,17 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/codex-k8s/hrm-sql-mcp/internal/sqlname"
 )
+
+// Querier is what the read functions need: *sql.DB in normal use, *sql.Tx in
+// the integration tests that create a procedure and roll it back, so they
+// leave nothing behind on a shared snapshot.
+type Querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
 // Proc is one procedure as the server holds it.
 type Proc struct {
@@ -64,17 +74,31 @@ func LoadAll(ctx context.Context, db *sql.DB) ([]Proc, error) {
 	return query(ctx, db, fmt.Sprintf(listQuery, "m.definition, CASE WHEN m.object_id IS NULL THEN 1 ELSE 0 END"))
 }
 
-// Get returns one procedure by bare or schema-qualified name.
-func Get(ctx context.Context, db *sql.DB, name string) (Proc, error) {
-	schema, bare := splitName(name)
+// Get returns one procedure by bare, schema-qualified or bracketed name.
+//
+// Every reading sqlname.Candidates allows is asked for in one query, and more
+// than one hit is an error naming them all: EIP.Dashboard_1 may be schema EIP
+// or the single identifier [EIP.Dashboard_1], and returning whichever row came
+// first would hand back the wrong definition without a word.
+func Get(ctx context.Context, db Querier, name string) (Proc, error) {
+	cands, err := sqlname.Candidates(name)
+	if err != nil {
+		return Proc{}, err
+	}
+	var where []string
+	var args []any
+	for i, c := range cands {
+		where = append(where, fmt.Sprintf("(p.name = @name%d AND (@schema%d = '' OR s.name = @schema%d))", i, i, i))
+		args = append(args, sql.Named(fmt.Sprintf("name%d", i), c.Object), sql.Named(fmt.Sprintf("schema%d", i), c.Schema))
+	}
 	q := `
 SELECT s.name, p.name, p.type_desc, p.create_date, p.modify_date,
        m.definition, CASE WHEN m.object_id IS NULL THEN 1 ELSE 0 END
 FROM sys.procedures AS p
 JOIN sys.schemas AS s ON s.schema_id = p.schema_id
 LEFT JOIN sys.sql_modules AS m ON m.object_id = p.object_id
-WHERE p.name = @name AND (@schema = '' OR s.name = @schema)`
-	got, err := query(ctx, db, q, sql.Named("name", bare), sql.Named("schema", schema))
+WHERE ` + strings.Join(where, " OR ")
+	got, err := query(ctx, db, q, args...)
 	if err != nil {
 		return Proc{}, err
 	}
@@ -84,11 +108,15 @@ WHERE p.name = @name AND (@schema = '' OR s.name = @schema)`
 	case 1:
 		return got[0], nil
 	default:
-		return Proc{}, fmt.Errorf("procedure %q is ambiguous across %d schemas; qualify it", name, len(got))
+		var seen []string
+		for _, p := range got {
+			seen = append(seen, sqlname.Name{Schema: p.Schema, Object: p.Name}.Quoted())
+		}
+		return Proc{}, fmt.Errorf("procedure %q is ambiguous: %s; qualify it", name, strings.Join(seen, ", "))
 	}
 }
 
-func query(ctx context.Context, db *sql.DB, q string, args ...any) ([]Proc, error) {
+func query(ctx context.Context, db Querier, q string, args ...any) ([]Proc, error) {
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read sys.procedures: %w", err)
@@ -108,19 +136,6 @@ func query(ctx context.Context, db *sql.DB, q string, args ...any) ([]Proc, erro
 		out = append(out, p)
 	}
 	return out, rows.Err()
-}
-
-// splitName separates an optional schema prefix and strips [brackets].
-func splitName(name string) (schema, bare string) {
-	unbracket := func(s string) string {
-		s = strings.TrimSpace(s)
-		s = strings.TrimPrefix(s, "[")
-		return strings.TrimSuffix(s, "]")
-	}
-	if i := strings.LastIndex(name, "."); i >= 0 {
-		return unbracket(name[:i]), unbracket(name[i+1:])
-	}
-	return "", unbracket(name)
 }
 
 // Index maps Key to procedure and reports names defined in more than one

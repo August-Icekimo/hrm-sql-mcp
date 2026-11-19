@@ -174,6 +174,30 @@ func TestParseTextFindsCreateOrAlter(t *testing.T) {
 	}
 }
 
+// TestParseTextFindsDottedNames covers systems that put dots inside a
+// bracketed procedure name, as EIP does for every one of its procedures. The
+// old pattern allowed only [A-Za-z0-9_] between the brackets, so these files
+// parsed as defining nothing and their procedures vanished from the file side
+// of the inventory.
+func TestParseTextFindsDottedNames(t *testing.T) {
+	cases := []struct {
+		name, script, want string
+	}{
+		{"bracketed dotted", "CREATE PROCEDURE [EIP.humanly.BasicSetup.PersonalRestDayBase_1]\nAS\nSELECT 1\n", "eip.humanly.basicsetup.personalrestdaybase_1"},
+		{"schema and dotted", "ALTER PROCEDURE [dbo].[EIP.Dashboard_1]\nAS\nSELECT 1\n", "eip.dashboard_1"},
+		{"plain schema, dotted name", "CREATE OR ALTER PROC dbo.[EIP.CodeListUpdate_1] AS SELECT 1\n", "eip.codelistupdate_1"},
+		{"double quoted", "CREATE PROC \"EIP.x_1\" AS SELECT 1\n", "eip.x_1"},
+		{"escaped bracket", "CREATE PROC [a]]b] AS SELECT 1\n", "a]b"},
+		{"undelimited dot is schema", "CREATE PROC EIP.Dashboard_1 AS SELECT 1\n", "dashboard_1"},
+	}
+	for _, c := range cases {
+		s := ParseText(c.script)
+		if len(s.Procs) != 1 || s.Procs[0] != c.want {
+			t.Errorf("%s: procs = %v, want [%s]", c.name, s.Procs, c.want)
+		}
+	}
+}
+
 // TestNormalizeIsRestrained is the important one. A normaliser that is too
 // aggressive reports "identical" for procedures that genuinely differ, which
 // is worse than having no tool.

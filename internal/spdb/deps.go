@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/codex-k8s/hrm-sql-mcp/internal/sqlname"
 )
 
 // Direction selects which way dependencies are followed.
@@ -85,12 +87,15 @@ WHERE d.referenced_id = OBJECT_ID(@name)
 //   - Anything outside SQL. The application's own call sites are not in this
 //     view at all; that is what the Java scan in package spaudit is for. An
 //     "unused" verdict from here means unused *by other SQL modules*.
-func Deps(ctx context.Context, db *sql.DB, name string, dir Direction) ([]Dependency, error) {
-	schema, bare := splitName(name)
-	qualified := bare
-	if schema != "" {
-		qualified = schema + "." + bare
+func Deps(ctx context.Context, db Querier, name string, dir Direction) ([]Dependency, error) {
+	n, err := resolve(ctx, db, name)
+	if err != nil {
+		return nil, err
 	}
+	// Quoted, not schema + "." + object: OBJECT_ID parses its argument as a
+	// multi-part name, so [EIP.a.b_1] undelimited would be read as
+	// database EIP, schema a, object b_1.
+	qualified, bare := n.Quoted(), n.Object
 
 	var out []Dependency
 	if dir == Uses || dir == Both {
@@ -121,7 +126,7 @@ func Deps(ctx context.Context, db *sql.DB, name string, dir Direction) ([]Depend
 	return out, nil
 }
 
-func depQuery(ctx context.Context, db *sql.DB, q string, dir Direction, args ...any) ([]Dependency, error) {
+func depQuery(ctx context.Context, db Querier, q string, dir Direction, args ...any) ([]Dependency, error) {
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read sys.sql_expression_dependencies: %w", err)
@@ -146,4 +151,44 @@ func depQuery(ctx context.Context, db *sql.DB, q string, dir Direction, args ...
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// resolve picks the reading of name that exists on the server.
+//
+// With one candidate there is nothing to decide and no round trip is spent:
+// the dependency queries already cope with a missing object. With two
+// (undelimited EIP.Dashboard_1), each is tried with OBJECT_ID; if both exist
+// the caller has to qualify, and if neither does the first is returned so a
+// missing object still yields an empty answer rather than an error, matching
+// the single-candidate behaviour.
+func resolve(ctx context.Context, db Querier, name string) (sqlname.Name, error) {
+	cands, err := sqlname.Candidates(name)
+	if err != nil {
+		return sqlname.Name{}, err
+	}
+	if len(cands) == 1 {
+		return cands[0], nil
+	}
+	var found []sqlname.Name
+	for _, c := range cands {
+		var id sql.NullInt64
+		if err := db.QueryRowContext(ctx, `SELECT OBJECT_ID(@name)`, sql.Named("name", c.Quoted())).Scan(&id); err != nil {
+			return sqlname.Name{}, fmt.Errorf("resolve %q: %w", name, err)
+		}
+		if id.Valid {
+			found = append(found, c)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return cands[0], nil
+	case 1:
+		return found[0], nil
+	default:
+		var all []string
+		for _, c := range found {
+			all = append(all, c.Quoted())
+		}
+		return sqlname.Name{}, fmt.Errorf("name %q is ambiguous: %s; qualify it", name, strings.Join(all, ", "))
+	}
 }

@@ -214,6 +214,10 @@ hrm-sql-mcp sp get  --target "$TARGET" sp_SRJ0300
 hrm-sql-mcp sp diff --target "$TARGET"                   # 全部：原始檔 vs 資料庫
 hrm-sql-mcp sp diff --target "$TARGET" sp_SRJ0300        # 只比對指定幾支
 
+# 名稱本身含點號的系統（如 EIP 的 [EIP.humanly.X_1]）要加方括號，
+# 跟在 T-SQL 裡寫法一樣；沒加括號時兩種解讀都會試，同時命中就報 ambiguous
+hrm-sql-mcp sp get  --target "$TARGET" '[EIP.humanly.BasicSetup.PersonalRestDayBase_1]'
+
 # ── 盤點 ───────────────────────────────────────────────────────
 hrm-sql-mcp sp audit --target "$TARGET"                  # 三方比對，印在畫面上
 hrm-sql-mcp sp audit --offline                           # 不連資料庫，見〈接進 CI〉

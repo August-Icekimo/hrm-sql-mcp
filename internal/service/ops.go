@@ -12,6 +12,7 @@ import (
 	"github.com/codex-k8s/hrm-sql-mcp/internal/spaudit"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/spdb"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/spfile"
+	"github.com/codex-k8s/hrm-sql-mcp/internal/sqlname"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/sqlrun"
 	"github.com/codex-k8s/hrm-sql-mcp/internal/target"
 )
@@ -223,7 +224,9 @@ func (s *Service) SPDiff(ctx context.Context, alias string, names []string, diff
 
 	want := map[string]bool{}
 	for _, n := range names {
-		want[normaliseName(n)] = true
+		for _, k := range sqlname.Keys(n) {
+			want[k] = true
+		}
 	}
 
 	// Both fields are allocated up front: a nil map and a nil slice each
@@ -414,15 +417,4 @@ func (s *Service) relPath(p string) string {
 		return rel
 	}
 	return p
-}
-
-// normaliseName accepts dbo.sp_x, [dbo].[sp_x] and sp_x alike.
-func normaliseName(n string) string {
-	n = strings.TrimSpace(n)
-	n = strings.ReplaceAll(n, "[", "")
-	n = strings.ReplaceAll(n, "]", "")
-	if i := strings.LastIndex(n, "."); i >= 0 {
-		n = n[i+1:]
-	}
-	return strings.ToLower(n)
 }

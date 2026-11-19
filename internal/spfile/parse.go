@@ -5,6 +5,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/codex-k8s/hrm-sql-mcp/internal/sqlname"
 )
 
 // procHeader matches CREATE/ALTER/CREATE OR ALTER PROCEDURE and captures the
@@ -21,10 +23,20 @@ import (
 // `missing-script` — the tool announcing that source it was holding did not
 // exist. That is exactly the silent-omission failure ScanDir's comment says
 // this tool must not create.
+//
+// A delimited identifier may contain dots: EIP names its procedures like
+// [EIP.humanly.BasicSetup.PersonalRestDayBase_1]. The previous pattern only
+// allowed [A-Za-z0-9_] inside the brackets, so every such file parsed as
+// defining nothing — the same silent omission described above, for a whole
+// system's worth of procedures. The name is captured with its delimiters and
+// unwrapped by package sqlname, which also undoes ]] escapes.
 var procHeader = regexp.MustCompile(
 	`(?im)^[ \t]*(CREATE[ \t]+OR[ \t]+ALTER|CREATE|ALTER)[ \t]+PROC(?:EDURE)?[ \t]+` +
-		`(?:\[?[A-Za-z0-9_]+\]?[ \t]*\.[ \t]*)?` + // optional schema, e.g. dbo.
-		`\[?([A-Za-z0-9_#@$]+)\]?`)
+		`(?:` + identifier + `[ \t]*\.[ \t]*)?` + // optional schema, e.g. dbo.
+		`(` + identifier + `)`)
+
+// identifier is one T-SQL identifier: [bracketed], "quoted" or plain.
+const identifier = `(?:\[(?:[^\]\n]|\]\])+\]|"[^"\n]+"|[A-Za-z0-9_#@$]+)`
 
 // Script is one parsed file from the stored-procedure directory.
 type Script struct {
@@ -96,7 +108,7 @@ func ParseText(text string) *Script {
 		if m == nil {
 			continue
 		}
-		name := strings.ToLower(m[2])
+		name := strings.ToLower(unwrap(m[2]))
 		if _, dup := seen[name]; !dup {
 			seen[name] = struct{}{}
 			s.Procs = append(s.Procs, name)
@@ -140,4 +152,15 @@ func ScanDir(dir string) (scripts []*Script, failures map[string]error, err erro
 		scripts = append(scripts, sc)
 	}
 	return scripts, failures, nil
+}
+
+// unwrap removes the delimiters procHeader captured. A single identifier always
+// parses; the fallback only guards against the pattern and sqlname drifting
+// apart, and keeps the raw text rather than dropping the procedure.
+func unwrap(id string) string {
+	c, err := sqlname.Candidates(id)
+	if err != nil || len(c) != 1 {
+		return id
+	}
+	return c[0].Object
 }
