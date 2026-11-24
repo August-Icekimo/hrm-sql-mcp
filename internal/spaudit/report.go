@@ -65,6 +65,8 @@ func (rep *Report) Markdown(opts MarkdownOptions) string {
 	}
 	fmt.Fprintf(&b, "| **合計** | **%d** | |\n", len(rep.Rows))
 
+	writeNotes(&b, rep)
+
 	for _, s := range rep.Statuses() {
 		rows := rep.ByStatus(s)
 		if len(rows) == 0 {
@@ -75,6 +77,45 @@ func (rep *Report) Markdown(opts MarkdownOptions) string {
 
 	writeProblems(&b, rep)
 	return b.String()
+}
+
+// writeNotes renders the human findings, immediately after the summary.
+//
+// Placed before the status tables on purpose. A note exists precisely because
+// the derived status is misleading on its own, so it has to be read first —
+// put at the bottom it would only ever be found by someone who already knew to
+// look, which is the person who least needs it.
+//
+// Each note carries the status the audit computed for that procedure, so the
+// two readings sit side by side rather than the reader having to go hunting
+// for the row. The status is shown, never overwritten: the note is extra
+// evidence, not a correction of the count.
+func writeNotes(b *strings.Builder, rep *Report) {
+	if len(rep.Notes) == 0 {
+		return
+	}
+
+	statusOf := make(map[string]Status, len(rep.Rows))
+	for _, r := range rep.Rows {
+		statusOf[strings.ToLower(r.Name)] = r.Status
+	}
+
+	b.WriteString("\n## 📌 人工註記\n\n")
+	b.WriteString("> 以下是靠查證得來、三方比對看不出來的結論。" +
+		"註記**不會**改變任何狀態或數量——它們是額外的證據，不是對盤點結果的修正。\n\n")
+
+	for _, name := range rep.Notes.Names() {
+		st, ok := statusOf[name]
+		label := "（本次盤點未出現此程序）"
+		if ok {
+			label = "本次盤點狀態：`" + string(st) + "`"
+		}
+		fmt.Fprintf(b, "### `%s`\n\n%s\n\n", name, label)
+		for _, line := range strings.Split(rep.Notes.Get(name), "\n") {
+			fmt.Fprintf(b, "> %s\n", strings.TrimRight(line, " \t"))
+		}
+		b.WriteString("\n")
+	}
 }
 
 func writeSection(b *strings.Builder, s Status, rows []Row, opts MarkdownOptions) {

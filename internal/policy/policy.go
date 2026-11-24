@@ -88,6 +88,10 @@ type Paths struct {
 	SPDir      string `yaml:"sp_dir"`
 	SchemaDict string `yaml:"schema_dict"`
 	JavaSrcDir string `yaml:"java_src_dir"`
+	// SPNotes is an optional YAML file of human findings keyed by procedure
+	// name, rendered into the inventory report. Optional and missing-is-fine:
+	// a project that never writes one sees no difference.
+	SPNotes string `yaml:"sp_notes"`
 }
 
 // Audit configures the append-only log.
